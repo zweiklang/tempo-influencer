@@ -90,10 +90,12 @@ router.get(
   tryCatch(async (_req, res) => {
     const project = getSelectedProject();
     if (!project) { res.json(null); return; }
+    const jiraProjectKeyEnc = getSetting('jira_project_key');
     res.json({
       projectId: project.project_id,
       projectName: project.project_name,
       tempoId: project.tempo_id,
+      jiraProjectKey: jiraProjectKeyEnc ? decrypt(jiraProjectKeyEnc) : undefined,
     });
   })
 );
@@ -102,6 +104,7 @@ const ProjectBody = z.object({
   projectId: z.string().min(1),
   projectName: z.string().min(1),
   tempoId: z.string().optional(),
+  jiraProjectKey: z.string().optional(),
 });
 
 // PUT /project — set selected project
@@ -114,8 +117,11 @@ router.put(
       return;
     }
 
-    const { projectId, projectName, tempoId } = parsed.data;
+    const { projectId, projectName, tempoId, jiraProjectKey } = parsed.data;
     setSelectedProject({ project_id: projectId, project_name: projectName, tempo_id: tempoId });
+    if (jiraProjectKey !== undefined) {
+      setSetting('jira_project_key', encrypt(jiraProjectKey));
+    }
     res.json({ success: true });
   })
 );

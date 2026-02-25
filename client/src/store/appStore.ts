@@ -5,6 +5,7 @@ interface SelectedProject {
   projectId: string;
   projectName: string;
   tempoId?: string;
+  jiraProjectKey?: string;
 }
 
 interface ActivePeriod {

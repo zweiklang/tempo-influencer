@@ -166,11 +166,13 @@ function ProjectSelector() {
   const setSelectedProject = useAppStore((s) => s.setSelectedProject);
 
   const [selectedValue, setSelectedValue] = useState('');
+  const [jiraKey, setJiraKey] = useState('');
 
   const sp = selectedProjectData as {
     projectId?: string;
     projectName?: string;
     tempoId?: string;
+    jiraProjectKey?: string;
   } | undefined;
 
   const { data: projectsData, isLoading: projectsLoading } = useTempoProjects();
@@ -189,18 +191,42 @@ function ProjectSelector() {
         projectId: project.id,
         projectName: project.name,
         tempoId: project.id,
+        jiraProjectKey: jiraKey || sp?.jiraProjectKey,
       });
       setSelectedProject({
         projectId: project.id,
         projectName: project.name,
         tempoId: project.id,
+        jiraProjectKey: jiraKey || sp?.jiraProjectKey,
       });
       toast({ title: 'Project selected', description: `Now tracking ${project.name}` });
     } catch (err: unknown) {
       const error = err as Error;
       toast({ title: 'Failed to save project', description: error.message, variant: 'destructive' });
     }
-  }, [allProjects, saveProject, setSelectedProject, toast]);
+  }, [allProjects, jiraKey, sp?.jiraProjectKey, saveProject, setSelectedProject, toast]);
+
+  const handleSaveJiraKey = async () => {
+    if (!jiraKey.trim()) return;
+    try {
+      await saveProject.mutateAsync({
+        projectId: sp?.projectId ?? '',
+        projectName: sp?.projectName ?? '',
+        tempoId: sp?.tempoId,
+        jiraProjectKey: jiraKey.trim(),
+      });
+      setSelectedProject({
+        projectId: sp?.projectId ?? '',
+        projectName: sp?.projectName ?? '',
+        tempoId: sp?.tempoId,
+        jiraProjectKey: jiraKey.trim(),
+      });
+      toast({ title: 'Jira project key saved' });
+    } catch (err: unknown) {
+      const error = err as Error;
+      toast({ title: 'Failed to save', description: error.message, variant: 'destructive' });
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -208,6 +234,9 @@ function ProjectSelector() {
         <div className="flex items-center gap-2 text-sm bg-secondary rounded-md px-3 py-2">
           <span className="font-medium">Current project:</span>
           <span>{sp.projectName}</span>
+          {sp.jiraProjectKey && (
+            <Badge variant="outline" className="text-xs">{sp.jiraProjectKey}</Badge>
+          )}
         </div>
       )}
 
@@ -227,6 +256,28 @@ function ProjectSelector() {
             searchPlaceholder="Type to filter projects..."
           />
         )}
+      </div>
+
+      <div className="grid gap-2">
+        <Label htmlFor="jiraProjectKey">Jira Project Key</Label>
+        <p className="text-xs text-muted-foreground">Used to fetch open issues (e.g. DP2, SEUK)</p>
+        <div className="flex gap-2">
+          <Input
+            id="jiraProjectKey"
+            placeholder={sp?.jiraProjectKey ?? 'e.g. DP2'}
+            value={jiraKey}
+            onChange={(e) => setJiraKey(e.target.value)}
+            className="max-w-xs"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleSaveJiraKey}
+            disabled={!jiraKey.trim() || saveProject.isPending}
+          >
+            Save
+          </Button>
+        </div>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getSetting, getSelectedProject } from '../db';
+import { getSetting } from '../db';
 import { decrypt } from '../services/crypto';
 import { createJiraClient } from '../services/jiraClient';
 import type { RequestHandler } from 'express';
@@ -25,9 +25,9 @@ router.get(
       return;
     }
 
-    const project = getSelectedProject();
-    if (!project) {
-      res.status(400).json({ error: 'No project selected' });
+    const jiraProjectKeyEnc = getSetting('jira_project_key');
+    if (!jiraProjectKeyEnc) {
+      res.status(400).json({ error: 'No Jira project key configured. Set it in Settings.' });
       return;
     }
 
@@ -37,7 +37,8 @@ router.get(
       decrypt(jiraTokenEnc)
     );
 
-    const jql = `project = "${project.project_id}" AND statusCategory != Done ORDER BY updated DESC`;
+    const jiraProjectKey = decrypt(jiraProjectKeyEnc);
+    const jql = `project = "${jiraProjectKey}" AND statusCategory != Done ORDER BY updated DESC`;
     const issues = await jiraClient.searchIssues(jql);
 
     res.json(
