@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+server/data/
+.worktrees/
+
+# OS
+.DS_Store
+
+# Build artifacts
+client/dist/
+server/dist/
