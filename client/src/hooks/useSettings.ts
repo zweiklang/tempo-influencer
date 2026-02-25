@@ -25,11 +25,10 @@ export function useSaveProject() {
   });
 }
 
-export function useProjectSearch(q: string) {
+export function useTempoProjects() {
   return useQuery({
-    queryKey: ['projects-search', q],
-    queryFn: () => api.get(`/api/settings/projects/search?q=${encodeURIComponent(q)}`),
-    enabled: q.length >= 2,
+    queryKey: ['tempo-projects'],
+    queryFn: () => api.get('/api/settings/projects'),
     staleTime: 10 * 60 * 1000,
   });
 }

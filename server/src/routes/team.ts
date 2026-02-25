@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getSetting, getSelectedProject, upsertTeamMemberCache, getAllBillingRateOverrides, setBillingRateOverride } from '../db';
 import { decrypt } from '../services/crypto';
 import { createTempoClient } from '../services/tempoClient';
+import { createJiraClient } from '../services/jiraClient';
 import type { RequestHandler } from 'express';
 
 const router = Router();
@@ -17,6 +18,14 @@ function getTempoClient() {
   const tempoTokenEnc = getSetting('tempo_token');
   if (!tempoTokenEnc) return null;
   return createTempoClient(decrypt(tempoTokenEnc));
+}
+
+function getJiraClient() {
+  const jiraUrlEnc = getSetting('jira_url');
+  const jiraEmailEnc = getSetting('jira_email');
+  const jiraTokenEnc = getSetting('jira_token');
+  if (!jiraUrlEnc || !jiraEmailEnc || !jiraTokenEnc) return null;
+  return createJiraClient(decrypt(jiraUrlEnc), decrypt(jiraEmailEnc), decrypt(jiraTokenEnc));
 }
 
 // GET /teams
@@ -46,16 +55,38 @@ router.get(
       return;
     }
 
-    const members = await tempoClient.getTeamMembers(teamId);
+    const rawMembers = await tempoClient.getTeamMembers(teamId);
+
+    // Fetch display names from Jira
+    const displayNameMap = new Map<string, string>();
+    const jiraClient = getJiraClient();
+    if (jiraClient) {
+      try {
+        const accountIds = rawMembers.map((m) => m.member.accountId);
+        const jiraUsers = await jiraClient.getUsersByAccountIds(accountIds);
+        jiraUsers.forEach((u) => displayNameMap.set(u.accountId, u.displayName));
+      } catch {
+        // Fall back to accountId as display name
+      }
+    }
+
+    // Transform to flat shape expected by the client
+    const members = rawMembers.map((m) => ({
+      accountId: m.member.accountId,
+      displayName: displayNameMap.get(m.member.accountId) ?? m.member.accountId,
+      roleId: m.memberships?.active?.role?.id ?? null,
+      roleName: m.memberships?.active?.role?.name?.trim() ?? null,
+      membershipId: m.memberships?.active?.id ?? null,
+    }));
 
     // Upsert into cache
     for (const m of members) {
       upsertTeamMemberCache({
-        account_id: m.member.accountId,
-        display_name: m.member.displayName,
+        account_id: m.accountId,
+        display_name: m.displayName,
         email: null,
-        role_id: m.role?.id ?? null,
-        role_name: m.role?.name ?? null,
+        role_id: m.roleId,
+        role_name: m.roleName,
         team_id: teamId,
         cached_at: new Date().toISOString(),
       });

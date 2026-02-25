@@ -120,29 +120,19 @@ router.put(
   })
 );
 
-// GET /projects/search?q= — search Jira projects
+// GET /projects — list all Tempo financial projects
 router.get(
-  '/projects/search',
-  tryCatch(async (req, res) => {
-    const q = String(req.query.q ?? '');
-
-    const jiraUrlEnc = getSetting('jira_url');
-    const jiraEmailEnc = getSetting('jira_email');
-    const jiraTokenEnc = getSetting('jira_token');
-
-    if (!jiraUrlEnc || !jiraEmailEnc || !jiraTokenEnc) {
-      res.status(401).json({ error: 'Jira credentials not configured' });
+  '/projects',
+  tryCatch(async (_req, res) => {
+    const tempoTokenEnc = getSetting('tempo_token');
+    if (!tempoTokenEnc) {
+      res.status(401).json({ error: 'Tempo credentials not configured' });
       return;
     }
 
-    const jiraClient = createJiraClient(
-      decrypt(jiraUrlEnc),
-      decrypt(jiraEmailEnc),
-      decrypt(jiraTokenEnc)
-    );
-
-    const projects = await jiraClient.searchProjects(q);
-    res.json(projects.map((p) => ({ id: p.id, key: p.key, name: p.name })));
+    const tempoClient = createTempoClient(decrypt(tempoTokenEnc));
+    const projects = await tempoClient.getFinancialProjects();
+    res.json(projects.map((p) => ({ id: p.id, name: p.name, status: p.status })));
   })
 );
 

@@ -6,6 +6,7 @@ import type {
   TempoTeamMember,
   TempoRole,
   TempoGlobalRate,
+  TempoFinancialProject,
   CreateWorklogBody,
   TeamMembershipBody,
 } from '../types/tempo';
@@ -118,6 +119,16 @@ export function createTempoClient(token: string) {
         { params: { limit: 5000 } }
       );
       return res.data.results;
+    },
+
+    async getFinancialProjects(): Promise<TempoFinancialProject[]> {
+      return paginate<TempoFinancialProject>(async (offset) => {
+        const res = await client.get<{ results: TempoFinancialProject[]; metadata: { count: number; limit: number; next?: string } }>(
+          'projects',
+          { params: { limit: 5000, offset } }
+        );
+        return res.data;
+      });
     },
 
     async getProjectBudget(projectId: string): Promise<unknown> {

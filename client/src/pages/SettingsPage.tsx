@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Combobox } from '@/components/ui/combobox';
-import { useCredentials, useSaveCredentials, useSelectedProject, useSaveProject, useProjectSearch } from '@/hooks/useSettings';
+import { useCredentials, useSaveCredentials, useSelectedProject, useSaveProject, useTempoProjects } from '@/hooks/useSettings';
 import { useAppStore } from '@/store/appStore';
 import { useToast } from '@/components/ui/use-toast';
 import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
@@ -152,6 +152,12 @@ function CredentialsForm() {
   );
 }
 
+interface TempoFinancialProject {
+  id: string;
+  name: string;
+  status: string;
+}
+
 // Project Selector
 function ProjectSelector() {
   const { toast } = useToast();
@@ -159,8 +165,6 @@ function ProjectSelector() {
   const saveProject = useSaveProject();
   const setSelectedProject = useAppStore((s) => s.setSelectedProject);
 
-  const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [selectedValue, setSelectedValue] = useState('');
 
   const sp = selectedProjectData as {
@@ -169,75 +173,60 @@ function ProjectSelector() {
     tempoId?: string;
   } | undefined;
 
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery]);
-
-  const { data: searchResults, isFetching } = useProjectSearch(debouncedQuery);
-
-  const projects = (searchResults as Array<{ key: string; name: string; tempoId?: string }>) || [];
-  const options = projects.map((p) => ({ value: p.key, label: `${p.key} — ${p.name}` }));
+  const { data: projectsData, isLoading: projectsLoading } = useTempoProjects();
+  const allProjects = (projectsData as TempoFinancialProject[]) || [];
+  const options = allProjects.map((p) => ({
+    value: p.id,
+    label: p.status === 'IN_PROGRESS' ? p.name : `${p.name} (${p.status})`,
+  }));
 
   const handleSelect = useCallback(async (value: string) => {
     setSelectedValue(value);
-    const project = projects.find((p) => p.key === value);
+    const project = allProjects.find((p) => p.id === value);
     if (!project) return;
     try {
       await saveProject.mutateAsync({
-        projectId: project.key,
+        projectId: project.id,
         projectName: project.name,
-        tempoId: project.tempoId,
+        tempoId: project.id,
       });
       setSelectedProject({
-        projectId: project.key,
+        projectId: project.id,
         projectName: project.name,
-        tempoId: project.tempoId,
+        tempoId: project.id,
       });
       toast({ title: 'Project selected', description: `Now tracking ${project.name}` });
     } catch (err: unknown) {
       const error = err as Error;
       toast({ title: 'Failed to save project', description: error.message, variant: 'destructive' });
     }
-  }, [projects, saveProject, setSelectedProject, toast]);
+  }, [allProjects, saveProject, setSelectedProject, toast]);
 
   return (
     <div className="space-y-4">
-      {sp?.projectId && (
+      {sp?.projectName && (
         <div className="flex items-center gap-2 text-sm bg-secondary rounded-md px-3 py-2">
           <span className="font-medium">Current project:</span>
           <span>{sp.projectName}</span>
-          <Badge variant="outline">{sp.projectId}</Badge>
         </div>
       )}
 
       <div className="grid gap-2">
-        <Label>Search & Select Project</Label>
-        <div className="space-y-2">
-          <Input
-            placeholder="Type to search projects (min 2 chars)..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+        <Label>Select Tempo Financial Project</Label>
+        {projectsLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading projects...
+          </div>
+        ) : (
+          <Combobox
+            options={options}
+            value={selectedValue || sp?.projectId || ''}
+            onChange={handleSelect}
+            placeholder="Choose a project..."
+            searchPlaceholder="Type to filter projects..."
           />
-          {isFetching && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Searching...
-            </div>
-          )}
-          {options.length > 0 && (
-            <Combobox
-              options={options}
-              value={selectedValue}
-              onChange={handleSelect}
-              placeholder="Select a project..."
-              searchPlaceholder="Filter results..."
-            />
-          )}
-          {debouncedQuery.length >= 2 && !isFetching && options.length === 0 && (
-            <p className="text-sm text-muted-foreground">No projects found for "{debouncedQuery}"</p>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );

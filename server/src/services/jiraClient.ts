@@ -55,6 +55,15 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
       });
       return res.data;
     },
+
+    async getUsersByAccountIds(accountIds: string[]): Promise<JiraUser[]> {
+      if (accountIds.length === 0) return [];
+      const params = new URLSearchParams();
+      accountIds.forEach((id) => params.append('accountId', id));
+      params.set('maxResults', '50');
+      const res = await client.get<{ values: JiraUser[] }>(`user/bulk?${params.toString()}`);
+      return res.data.values;
+    },
   };
 }
 

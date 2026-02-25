@@ -45,28 +45,19 @@ export interface TempoTeam {
   lead?: TempoTeamLead;
 }
 
-export interface TempoTeamMemberMember {
-  accountId: string;
-  displayName: string;
-  type?: string;
-}
-
-export interface TempoTeamMemberRole {
+export interface TempoTeamMemberActiveMembership {
   id: number;
-  name: string;
-}
-
-export interface TempoTeamMemberCommitment {
   commitmentPercent: number;
+  from: string | null;
+  to: string | null;
+  role: { id: number; name: string };
 }
 
 export interface TempoTeamMember {
-  id: number;
-  member: TempoTeamMemberMember;
-  role: TempoTeamMemberRole;
-  commitment: TempoTeamMemberCommitment;
-  from?: string;
-  to?: string;
+  member: { accountId: string };
+  memberships: {
+    active: TempoTeamMemberActiveMembership;
+  };
 }
 
 export interface TempoRole {
@@ -99,6 +90,12 @@ export interface TempoProject {
   id: string;
   name: string;
   key: string;
+}
+
+export interface TempoFinancialProject {
+  id: string;
+  name: string;
+  status: string;
 }
 
 export interface CreateWorklogBody {
