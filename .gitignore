@@ -5,6 +5,9 @@ server/data/
 .worktrees
 .worktrees/
 
+# Credentials / secrets
+api_keys_tmp.md
+
 # OS
 .DS_Store
 
