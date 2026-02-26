@@ -38,20 +38,42 @@ interface Role {
   name: string;
 }
 
-interface BillingRate {
-  accountId?: string;
-  roleId?: number;
-  rate: number;
-  source: 'override' | 'global' | 'none';
+interface BillingRatesData {
+  projectDefaultRate: number | null;
+  globalRates: Array<{ account?: { id: string; type: string }; rate: number }>;
+  overrides: Array<{ account_id: string; billing_rate: number }>;
 }
 
-interface BillingRatesData {
-  rates: BillingRate[];
+type ResolvedRate = { rate: number; source: 'override' | 'global' | 'project-default' | 'none' };
+
+function resolveRateClient(
+  accountId: string,
+  roleId: number | undefined,
+  billingRates: BillingRatesData | undefined
+): ResolvedRate {
+  if (!billingRates) return { rate: 0, source: 'none' };
+
+  const override = billingRates.overrides.find((o) => o.account_id === accountId);
+  if (override) return { rate: override.billing_rate, source: 'override' };
+
+  if (roleId != null) {
+    const globalRate = billingRates.globalRates.find(
+      (r) => r.account?.type === 'ROLE' && String(r.account.id) === String(roleId)
+    );
+    if (globalRate) return { rate: globalRate.rate, source: 'global' };
+  }
+
+  if (billingRates.projectDefaultRate != null) {
+    return { rate: billingRates.projectDefaultRate, source: 'project-default' };
+  }
+
+  return { rate: 0, source: 'none' };
 }
 
 function RateSourceBadge({ source }: { source: string }) {
   if (source === 'override') return <Badge className="text-xs bg-blue-100 text-blue-800 border-0">override</Badge>;
   if (source === 'global') return <Badge variant="secondary" className="text-xs">global</Badge>;
+  if (source === 'project-default') return <Badge className="text-xs bg-purple-100 text-purple-800 border-0">project default</Badge>;
   return <Badge variant="destructive" className="text-xs">none</Badge>;
 }
 
@@ -72,9 +94,9 @@ function MemberRow({
   const saveOverride = useSaveBillingRateOverride();
   const updateMembership = useUpdateTeamMembership();
 
-  const rateEntry = billingRates?.rates?.find((r) => r.accountId === member.accountId);
+  const rateEntry = resolveRateClient(member.accountId, member.roleId, billingRates);
   const [overrideRate, setOverrideRate] = useState<string>(
-    rateEntry?.source === 'override' && rateEntry.rate != null ? rateEntry.rate.toString() : ''
+    rateEntry.source === 'override' ? rateEntry.rate.toString() : ''
   );
 
   const handleRoleChange = async (roleId: string) => {
@@ -134,9 +156,9 @@ function MemberRow({
       <TableCell>
         <div className="flex items-center gap-2">
           <span className="text-sm">
-            {rateEntry ? formatCurrency(rateEntry.rate) : '—'}
+            {rateEntry.source !== 'none' ? formatCurrency(rateEntry.rate) : '—'}
           </span>
-          {rateEntry && <RateSourceBadge source={rateEntry.source} />}
+          {rateEntry.source !== 'none' && <RateSourceBadge source={rateEntry.source} />}
         </div>
       </TableCell>
       <TableCell>

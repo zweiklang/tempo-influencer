@@ -21,8 +21,7 @@ export function useRoles() {
 export function useBillingRates(projectId: string | undefined) {
   return useQuery({
     queryKey: ['billing-rates', projectId],
-    queryFn: () => api.get(`/api/team/billing-rates?projectId=${projectId}`),
-    enabled: !!projectId,
+    queryFn: () => api.get('/api/team/billing-rates'),
     staleTime: 5 * 60 * 1000,
   });
 }

@@ -106,6 +106,17 @@ router.get(
       return;
     }
 
+    // Fetch project defaultBillingRate for rate cascade
+    let projectDefaultRate: number | null = null;
+    if (project.tempo_id) {
+      try {
+        const detail = await tempoClient.getProject(project.tempo_id);
+        projectDefaultRate = detail.defaultBillingRate?.value || null;
+      } catch {
+        // fall through
+      }
+    }
+
     const jiraClient = getJiraClient();
     const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
 
@@ -133,7 +144,7 @@ router.get(
       return { accountId, roleId: cached?.role_id ?? null };
     });
 
-    const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient);
+    const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
 
     // Batch-fetch issue keys from Jira (Tempo only returns numeric issue IDs)
     const uniqueIssueIds = [...new Set(worklogs.map((wl) => wl.issue?.id).filter((id): id is number => id != null))];
@@ -186,6 +197,17 @@ router.get(
       return;
     }
 
+    // Fetch project defaultBillingRate for rate cascade
+    let projectDefaultRate: number | null = null;
+    if (project.tempo_id) {
+      try {
+        const detail = await tempoClient.getProject(project.tempo_id);
+        projectDefaultRate = detail.defaultBillingRate?.value || null;
+      } catch {
+        // fall through
+      }
+    }
+
     const jiraClient = getJiraClient();
     const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
 
@@ -196,7 +218,7 @@ router.get(
       return { accountId, roleId: cached?.role_id ?? null };
     });
 
-    const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient);
+    const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
 
     let totalHours = 0;
     let totalRevenue = 0;

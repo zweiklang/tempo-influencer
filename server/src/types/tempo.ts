@@ -127,6 +127,7 @@ export interface TempoProjectDetail {
   id: string;
   name: string;
   status: string;
+  defaultBillingRate?: { currencyCode: string; value: number } | null;
   scope?: {
     source: TempoProjectScopeSource;
   };

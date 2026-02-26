@@ -1,7 +1,7 @@
 import { getBillingRateOverride } from '../db';
 import type { TempoClient } from './tempoClient';
 
-export type RateSource = 'override' | 'global' | 'none';
+export type RateSource = 'override' | 'global' | 'project-default' | 'none';
 
 export interface ResolvedRate {
   rate: number;
@@ -12,7 +12,8 @@ export async function resolveRate(
   projectId: string,
   accountId: string,
   roleId: number | null | undefined,
-  tempoClient: TempoClient
+  tempoClient: TempoClient,
+  projectDefaultRate?: number | null
 ): Promise<ResolvedRate> {
   // 1. Check billing_rate_overrides
   const override = getBillingRateOverride(projectId, accountId);
@@ -31,11 +32,16 @@ export async function resolveRate(
         return { rate: roleRate.rate, source: 'global' };
       }
     } catch {
-      // Fall through to 'none'
+      // Fall through
     }
   }
 
-  // 3. No rate found
+  // 3. Project default rate
+  if (projectDefaultRate != null) {
+    return { rate: projectDefaultRate, source: 'project-default' };
+  }
+
+  // 4. No rate found
   return { rate: 0, source: 'none' };
 }
 
@@ -47,7 +53,8 @@ export interface MemberInput {
 export async function resolveRatesForMembers(
   projectId: string,
   members: MemberInput[],
-  tempoClient: TempoClient
+  tempoClient: TempoClient,
+  projectDefaultRate?: number | null
 ): Promise<Map<string, ResolvedRate>> {
   const result = new Map<string, ResolvedRate>();
 
@@ -74,6 +81,11 @@ export async function resolveRatesForMembers(
         result.set(member.accountId, { rate: roleRate.rate, source: 'global' });
         continue;
       }
+    }
+
+    if (projectDefaultRate != null) {
+      result.set(member.accountId, { rate: projectDefaultRate, source: 'project-default' });
+      continue;
     }
 
     result.set(member.accountId, { rate: 0, source: 'none' });

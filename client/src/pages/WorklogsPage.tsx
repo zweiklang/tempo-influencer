@@ -22,7 +22,7 @@ interface WorklogEntry {
   startDate: string;
   hours: number;
   billingRate?: number;
-  rateSource?: 'override' | 'global' | 'none';
+  rateSource?: 'override' | 'global' | 'project-default' | 'none';
   revenue?: number;
 }
 
@@ -42,6 +42,7 @@ type SortDir = 'asc' | 'desc';
 function RateSourceBadge({ source }: { source?: string }) {
   if (source === 'override') return <Badge className="ml-1 text-xs bg-blue-100 text-blue-800 border-0">override</Badge>;
   if (source === 'global') return <Badge variant="secondary" className="ml-1 text-xs">global</Badge>;
+  if (source === 'project-default') return <Badge className="ml-1 text-xs bg-purple-100 text-purple-800 border-0">project default</Badge>;
   return <Badge variant="destructive" className="ml-1 text-xs">none</Badge>;
 }
 

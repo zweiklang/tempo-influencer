@@ -178,12 +178,26 @@ router.get(
     const project = getSelectedProject();
     const projectId = project?.project_id ?? '';
 
-    const [globalRates, overrides] = await Promise.all([
-      tempoClient.getGlobalRates(),
-      Promise.resolve(projectId ? getAllBillingRateOverrides(projectId) : []),
-    ]);
+    let globalRates: Awaited<ReturnType<typeof tempoClient.getGlobalRates>> = [];
+    try {
+      globalRates = await tempoClient.getGlobalRates();
+    } catch {
+      // fall through — no global rates
+    }
+    const overrides = projectId ? getAllBillingRateOverrides(projectId) : [];
 
-    res.json({ globalRates, overrides });
+    // Fetch project defaultBillingRate if tempo_id is available
+    let projectDefaultRate: number | null = null;
+    if (project?.tempo_id) {
+      try {
+        const detail = await tempoClient.getProject(project.tempo_id);
+        projectDefaultRate = detail.defaultBillingRate?.value || null;
+      } catch {
+        // fall through — no project default rate
+      }
+    }
+
+    res.json({ projectDefaultRate, globalRates, overrides });
   })
 );
 
