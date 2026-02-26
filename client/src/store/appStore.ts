@@ -39,6 +39,9 @@ export const useAppStore = create<AppState>()(
       setCredentialsConfigured: (v) => set({ credentialsConfigured: v }),
       setActiveTeamId: (id) => set({ activeTeamId: id }),
     }),
-    { name: 'tempo-influencer-store' }
+    {
+      name: 'tempo-influencer-store',
+      partialize: (state) => ({ activePeriod: state.activePeriod, activeTeamId: state.activeTeamId }),
+    }
   )
 );
