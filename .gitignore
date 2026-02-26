@@ -8,6 +8,11 @@ server/data/
 # Credentials / secrets
 api_keys_tmp.md
 
+# Memory and research files
+MEMORY.md
+project-vision.md
+tempo-api-research.md
+
 # OS
 .DS_Store
 
