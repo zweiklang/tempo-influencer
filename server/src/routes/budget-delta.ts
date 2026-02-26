@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import axios from 'axios';
 import { getSetting, getSelectedProject, insertWorklogAudit } from '../db';
 import { decrypt } from '../services/crypto';
 import { createTempoClient } from '../services/tempoClient';
+import { createJiraClient } from '../services/jiraClient';
 import { calculateHours } from '../services/hourCalculator';
 import { distributeWorklogs } from '../services/worklogDistributor';
 import type { RequestHandler } from 'express';
@@ -19,6 +21,14 @@ function getTempoClient() {
   const tempoTokenEnc = getSetting('tempo_token');
   if (!tempoTokenEnc) return null;
   return createTempoClient(decrypt(tempoTokenEnc));
+}
+
+function getJiraClient() {
+  const jiraUrlEnc = getSetting('jira_url');
+  const jiraEmailEnc = getSetting('jira_email');
+  const jiraTokenEnc = getSetting('jira_token');
+  if (!jiraUrlEnc || !jiraEmailEnc || !jiraTokenEnc) return null;
+  return createJiraClient(decrypt(jiraUrlEnc), decrypt(jiraEmailEnc), decrypt(jiraTokenEnc));
 }
 
 function snapToHalf(value: number): number {
@@ -228,26 +238,50 @@ router.post(
     const { accountId, issueId, startDate, hours } = parsed.data;
     const timeSpentSeconds = Math.round(hours * 3600);
 
-    const wl = await tempoClient.createWorklog({
-      issueId,
-      authorAccountId: accountId,
-      startDate,
-      startTime: '09:00:00',
-      timeSpentSeconds,
-      billableSeconds: timeSpentSeconds,
-    });
+    try {
+      const wl = await tempoClient.createWorklog({
+        issueId,
+        authorAccountId: accountId,
+        startDate,
+        startTime: '09:00:00',
+        timeSpentSeconds,
+        billableSeconds: timeSpentSeconds,
+      });
 
-    insertWorklogAudit({
-      tempo_worklog_id: wl.tempoWorklogId,
-      account_id: accountId,
-      issue_id: String(issueId),
-      start_date: startDate,
-      hours,
-      operation: 'create',
-      status: 'success',
-    });
+      insertWorklogAudit({ tempo_worklog_id: wl.tempoWorklogId, account_id: accountId, issue_id: String(issueId), start_date: startDate, hours, operation: 'create', status: 'success' });
+      res.json({ success: true, tempoWorklogId: wl.tempoWorklogId, via: 'tempo' });
 
-    res.json({ success: true, tempoWorklogId: wl.tempoWorklogId });
+    } catch (tempoErr: unknown) {
+      const isForbidden = axios.isAxiosError(tempoErr) && tempoErr.response?.status === 403;
+
+      if (isForbidden) {
+        console.warn(`[Tempo 403] accountId=${accountId} issueId=${issueId}`, JSON.stringify(axios.isAxiosError(tempoErr) ? tempoErr.response?.data : null));
+      }
+
+      if (!isForbidden) {
+        const errorMessage = tempoErr instanceof Error ? tempoErr.message : String(tempoErr);
+        insertWorklogAudit({ account_id: accountId, issue_id: String(issueId), start_date: startDate, hours, operation: 'create', status: 'error', error_message: errorMessage });
+        throw tempoErr; // let tryCatch handle it
+      }
+
+      // 403 from Tempo — try Jira fallback
+      const jiraClient = getJiraClient();
+      if (!jiraClient) {
+        res.status(403).json({ error: 'Tempo returned 403 and Jira credentials are not configured' });
+        return;
+      }
+
+      try {
+        await jiraClient.createWorklog(issueId, timeSpentSeconds, startDate, accountId);
+        insertWorklogAudit({ account_id: accountId, issue_id: String(issueId), start_date: startDate, hours, operation: 'create', status: 'success', error_message: 'created via Jira fallback (Tempo 403)' });
+        res.json({ success: true, via: 'jira' });
+
+      } catch (jiraErr: unknown) {
+        const errorMessage = `Tempo 403; Jira fallback also failed: ${jiraErr instanceof Error ? jiraErr.message : String(jiraErr)}`;
+        insertWorklogAudit({ account_id: accountId, issue_id: String(issueId), start_date: startDate, hours, operation: 'create', status: 'error', error_message: errorMessage });
+        res.status(502).json({ error: errorMessage });
+      }
+    }
   })
 );
 

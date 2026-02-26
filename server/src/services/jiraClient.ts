@@ -96,6 +96,17 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
       return res.data.values;
     },
 
+    async createWorklog(issueIdOrKey: string | number, timeSpentSeconds: number, startDate: string, authorAccountId: string): Promise<{ id: string }> {
+      // Jira requires ISO 8601 format with offset: "2026-02-13T09:00:00.000+0000"
+      const started = `${startDate}T09:00:00.000+0000`;
+      const res = await client.post<{ id: string }>(`issue/${issueIdOrKey}/worklog`, {
+        timeSpentSeconds,
+        started,
+        author: { accountId: authorAccountId },
+      });
+      return res.data;
+    },
+
     async getIssueIdsByScope(scopeType: string, reference: string): Promise<Set<number>> {
       let jql: string;
       switch (scopeType) {
