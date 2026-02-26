@@ -244,6 +244,7 @@ function Step2({
 
   const [isCalculating, setIsCalculating] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastPrefillTeamIdRef = useRef<number | null>(null);
 
   // Derive unique roles from the loaded team members
   const teamRoles = useMemo(
@@ -268,6 +269,51 @@ function Step2({
   useEffect(() => {
     onRolesChange([]);
   }, [selectedTeamId]);
+
+  // Auto-prefill roles, members, and billing rates when team members load
+  useEffect(() => {
+    if (!members || members.length === 0 || !billingRatesData) return;
+    // Only prefill once per team selection; don't overwrite manual edits
+    if (lastPrefillTeamIdRef.current === selectedTeamId) return;
+    lastPrefillTeamIdRef.current = selectedTeamId;
+
+    // Build role → accountIds map
+    const roleMap = new Map<number, { roleName: string; accountIds: string[] }>();
+    for (const m of members) {
+      if (!m.roleId) continue;
+      if (!roleMap.has(m.roleId)) {
+        roleMap.set(m.roleId, { roleName: m.roleName ?? 'Unknown', accountIds: [] });
+      }
+      roleMap.get(m.roleId)!.accountIds.push(m.accountId);
+    }
+
+    const overrides = (billingRatesData as { overrides?: Array<{ account_id: string; billing_rate: number }> }).overrides ?? [];
+    const projectDefaultRate = (billingRatesData as { projectDefaultRate?: number }).projectDefaultRate ?? 0;
+
+    const preFilledRoles: RoleConfig[] = Array.from(roleMap.entries()).map(([roleId, { roleName, accountIds }]) => {
+      let billingRate = projectDefaultRate;
+      for (const accountId of accountIds) {
+        const override = overrides.find(o => o.account_id === accountId);
+        if (override) { billingRate = override.billing_rate; break; }
+      }
+      return { roleId, roleName, billingRate, memberCount: accountIds.length, accountIds };
+    });
+
+    onRolesChange(preFilledRoles);
+
+    // Immediately calculate hours for the prefilled roles so hourBreakdown is
+    // populated before the user navigates to Step 3 (bypasses the 500ms debounce
+    // which would be cancelled if Step 2 unmounts first).
+    api.post<{ breakdown: HourBreakdown[] }>('/api/budget-delta/calculate', {
+      targetRevenue,
+      currentRevenue,
+      from,
+      to,
+      roles: preFilledRoles,
+    }).then(result => {
+      onBreakdownChange(result.breakdown || []);
+    }).catch(() => {});
+  }, [members, billingRatesData, selectedTeamId, onRolesChange, onBreakdownChange, targetRevenue, currentRevenue, from, to]);
 
   const getRateForRole = useCallback((roleId: number): number => {
     const rateEntry = billingRates?.rates?.find((r) => r.roleId === roleId);
@@ -510,7 +556,7 @@ function Step3({
     if (issues.length > 0 && issueConfigs.length === 0) {
       onIssueConfigsChange(
         issues.map(issue => ({
-          issueId: issue.id,
+          issueId: Number(issue.id),
           issueKey: issue.key,
           issueName: issue.summary,
           roleIds: [],
@@ -601,7 +647,7 @@ function Step3({
           return (
             <div
               key={ic.issueId}
-              className={`border rounded-lg p-4 transition-colors ${hasRoles ? 'border-primary/50 bg-primary/5' : 'opacity-60'}`}
+              className={`relative border rounded-lg p-4 transition-colors ${hasRoles ? 'border-primary/50 bg-primary/5' : 'opacity-60'} ${dropdownOpen[ic.issueId] ? 'z-10' : ''}`}
             >
               {/* Issue header */}
               <div className="flex items-start gap-2 mb-3">
@@ -773,6 +819,8 @@ function Step4({
           totalHours: h.totalHours,
         })),
         memberNames,
+        targetRevenue,
+        currentRevenue,
         from,
         to,
         seed: currentSeed,

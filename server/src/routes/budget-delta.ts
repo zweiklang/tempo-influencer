@@ -89,6 +89,8 @@ const DistributeBody = z.object({
   from: z.string().min(1),
   to: z.string().min(1),
   seed: z.number().optional(),
+  targetRevenue: z.number().optional(),
+  currentRevenue: z.number().optional(),
 });
 
 router.post(
@@ -112,7 +114,34 @@ router.post(
       return;
     }
 
-    const { issueConfigs, roleConfigs, hourBreakdown, memberNames, from, to, seed } = parsed.data;
+    const { issueConfigs, roleConfigs, hourBreakdown: passedBreakdown, memberNames, from, to, seed, targetRevenue, currentRevenue } = parsed.data;
+
+    // Determine which roles actually have issues assigned
+    const assignedRoleIds = new Set(issueConfigs.flatMap(ic => ic.roleIds));
+    const activeRoleConfigs = roleConfigs.filter(r => assignedRoleIds.has(r.roleId));
+
+    // If target/current revenue are provided, recalculate hours using only active roles
+    // so the distribution aims to cover the full delta with whatever roles are in play.
+    let effectiveBreakdown: Array<{ roleId: number; hoursPerMember: number; totalHours: number }>;
+    if (targetRevenue != null && currentRevenue != null && activeRoleConfigs.length > 0) {
+      const result = calculateHours({
+        targetRevenue,
+        currentRevenue,
+        roles: activeRoleConfigs.map(r => ({
+          roleId: r.roleId,
+          roleName: r.roleName,
+          billingRate: r.billingRate,
+          memberCount: r.accountIds.length || 1,
+        })),
+      });
+      effectiveBreakdown = result.roles.map(r => ({
+        roleId: Number(r.roleId),
+        hoursPerMember: r.hoursPerMember,
+        totalHours: r.totalHours,
+      }));
+    } else {
+      effectiveBreakdown = passedBreakdown.filter(h => assignedRoleIds.has(h.roleId));
+    }
 
     // Build flat assignments + track roleId per (accountId, issueId)
     const assignments: Array<{ accountId: string; issueId: number; totalHours: number }> = [];
@@ -120,7 +149,7 @@ router.post(
 
     for (const roleConfig of roleConfigs) {
       const { roleId, accountIds } = roleConfig;
-      const breakdown = hourBreakdown.find(h => h.roleId === roleId);
+      const breakdown = effectiveBreakdown.find(h => h.roleId === roleId);
       if (!breakdown || breakdown.totalHours === 0) continue;
 
       const roleIssues = issueConfigs.filter(ic => ic.roleIds.includes(roleId));

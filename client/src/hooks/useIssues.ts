@@ -6,7 +6,7 @@ export function useOpenIssues() {
   const { selectedProject } = useAppStore();
   return useQuery({
     queryKey: ['open-issues', selectedProject?.projectId],
-    queryFn: () => api.get(`/api/issues/open?projectKey=${selectedProject?.projectId}`),
+    queryFn: () => api.get('/api/issues/open'),
     enabled: !!selectedProject,
     staleTime: 10 * 60 * 1000,
   });
