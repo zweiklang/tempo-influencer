@@ -67,32 +67,45 @@ export function calculateHours(input: HourCalculatorInput): HourCalculatorOutput
     };
   });
 
-  // Drift reconciliation
-  let achievedRevenue = roleOutputs.reduce((sum, r) => sum + r.revenueContribution, 0);
-  const drift = Math.abs(achievedRevenue - targetRevenue);
-
-  if (targetRevenue !== 0 && drift / Math.abs(targetRevenue) > 0.05 && roleOutputs.length > 0) {
-    // Find the highest-rate role to adjust
-    const highestRateIdx = roleOutputs.reduce(
-      (bestIdx, r, idx) =>
-        r.billingRate > roleOutputs[bestIdx].billingRate ? idx : bestIdx,
-      0
-    );
-
-    const adjustment = achievedRevenue < targetRevenue ? 0.5 : -0.5;
-    const role = roleOutputs[highestRateIdx];
-    role.hoursPerMember = Math.max(0, role.hoursPerMember + adjustment);
-    role.totalHours = role.hoursPerMember * role.memberCount;
-    role.revenueContribution = role.hoursPerMember * role.memberCount * role.billingRate;
-
-    achievedRevenue = roleOutputs.reduce((sum, r) => sum + r.revenueContribution, 0);
+  // Iterative greedy reconciliation: minimize |achievedDelta - deltaRevenue|
+  let achievedDelta = roleOutputs.reduce((sum, r) => sum + r.revenueContribution, 0);
+  let improved = true;
+  while (improved) {
+    improved = false;
+    let bestIdx = -1;
+    let bestAdj = 0;
+    let bestError = Math.abs(achievedDelta - deltaRevenue);
+    for (let i = 0; i < roleOutputs.length; i++) {
+      const role = roleOutputs[i];
+      if (role.billingRate === 0) continue;
+      for (const adj of [-0.5, 0.5]) {
+        const newHours = role.hoursPerMember + adj;
+        if (newHours < 0) continue;
+        const newContrib = newHours * role.memberCount * role.billingRate;
+        const newAchieved = achievedDelta - role.revenueContribution + newContrib;
+        const newError = Math.abs(newAchieved - deltaRevenue);
+        if (newError < bestError) {
+          bestError = newError;
+          bestIdx = i;
+          bestAdj = adj;
+        }
+      }
+    }
+    if (bestIdx >= 0) {
+      const role = roleOutputs[bestIdx];
+      role.hoursPerMember += bestAdj;
+      role.totalHours = role.hoursPerMember * role.memberCount;
+      role.revenueContribution = role.hoursPerMember * role.memberCount * role.billingRate;
+      achievedDelta = roleOutputs.reduce((sum, r) => sum + r.revenueContribution, 0);
+      improved = true;
+    }
   }
 
-  const totalDeltaRevenue = achievedRevenue;
+  const totalDeltaRevenue = achievedDelta;
 
   return {
     roles: roleOutputs,
     totalDeltaRevenue,
-    achievedRevenue: currentRevenue + achievedRevenue,
+    achievedRevenue: currentRevenue + achievedDelta,
   };
 }
