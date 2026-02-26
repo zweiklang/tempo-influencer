@@ -7,17 +7,18 @@ import { Badge } from '@/components/ui/badge';
 import {
   Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
 } from '@/components/ui/select';
+import { Combobox } from '@/components/ui/combobox';
 import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from '@/components/ui/table';
 import {
   useTeams, useTeamMembers, useRoles, useBillingRates,
-  useSaveBillingRateOverride, useCreateRole, useUpdateTeamMembership,
+  useSaveBillingRateOverride, useUpdateTeamMembership,
 } from '@/hooks/useTeam';
 import { useAppStore } from '@/store/appStore';
 import { useToast } from '@/components/ui/use-toast';
 import { formatCurrency } from '@/lib/utils';
-import { Loader2, Plus } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 
 interface TempoTeam {
   id: number;
@@ -100,7 +101,7 @@ function MemberRow({
     try {
       await saveOverride.mutateAsync({
         accountId: member.accountId,
-        projectId,
+        projectId: projectId ?? '',
         rate,
       });
       toast({ title: 'Billing rate override saved' });
@@ -161,48 +162,12 @@ function MemberRow({
   );
 }
 
-function AddRoleForm() {
-  const { toast } = useToast();
-  const createRole = useCreateRole();
-  const [roleName, setRoleName] = useState('');
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!roleName.trim()) return;
-    try {
-      await createRole.mutateAsync({ name: roleName.trim() });
-      toast({ title: 'Role created', description: `"${roleName}" added successfully` });
-      setRoleName('');
-    } catch (err: unknown) {
-      const error = err as Error;
-      toast({ title: 'Failed to create role', description: error.message, variant: 'destructive' });
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="flex items-end gap-2">
-      <div className="grid gap-1.5 flex-1 max-w-xs">
-        <Label htmlFor="roleName">New Role Name</Label>
-        <Input
-          id="roleName"
-          placeholder="e.g. Service Designer"
-          value={roleName}
-          onChange={(e) => setRoleName(e.target.value)}
-        />
-      </div>
-      <Button type="submit" disabled={createRole.isPending || !roleName.trim()} size="sm">
-        {createRole.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <><Plus className="h-4 w-4 mr-1" />Add Role</>}
-      </Button>
-    </form>
-  );
-}
-
 export function TeamPage() {
-  const { selectedProject } = useAppStore();
-  const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
+  const { selectedProject, activeTeamId, setActiveTeamId } = useAppStore();
+  const [roleFilter, setRoleFilter] = useState('');
 
   const { data: teamsData, isLoading: teamsLoading } = useTeams();
-  const { data: membersData, isLoading: membersLoading } = useTeamMembers(selectedTeamId);
+  const { data: membersData, isLoading: membersLoading } = useTeamMembers(activeTeamId);
   const { data: rolesData } = useRoles();
   const { data: billingRatesData } = useBillingRates(selectedProject?.projectId);
 
@@ -211,28 +176,16 @@ export function TeamPage() {
   const roles = (rolesData as Role[]) || [];
   const billingRates = billingRatesData as BillingRatesData | undefined;
 
+  const filteredMembers = members.filter(
+    (m) => !roleFilter || (m.roleName ?? '').toLowerCase().includes(roleFilter.toLowerCase())
+  );
+
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold">Team Management</h2>
         <p className="text-muted-foreground mt-1">Manage team members, roles and billing rates</p>
       </div>
-
-      {/* Roles Management */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Roles</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {roles.map((role) => (
-              <Badge key={role.id} variant="secondary">{role.name}</Badge>
-            ))}
-            {roles.length === 0 && <p className="text-sm text-muted-foreground">No roles defined yet</p>}
-          </div>
-          <AddRoleForm />
-        </CardContent>
-      </Card>
 
       {/* Team Selector */}
       <Card>
@@ -248,33 +201,37 @@ export function TeamPage() {
                 Loading teams...
               </div>
             ) : (
-              <Select
-                value={selectedTeamId?.toString() || ''}
-                onValueChange={(v) => setSelectedTeamId(parseInt(v))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Choose a team..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {teams.map((team) => (
-                    <SelectItem key={team.id} value={team.id.toString()}>
-                      {team.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox
+                options={teams.map((t) => ({ value: t.id.toString(), label: t.name }))}
+                value={activeTeamId?.toString() ?? ''}
+                onChange={(v) => setActiveTeamId(v ? parseInt(v) : null)}
+                placeholder="Choose a team..."
+                searchPlaceholder="Search teams..."
+              />
             )}
           </div>
 
-          {selectedTeamId !== null && (
+          {members.length > 0 && (
+            <div className="max-w-xs">
+              <Input
+                placeholder="Filter by role..."
+                value={roleFilter}
+                onChange={(e) => setRoleFilter(e.target.value)}
+              />
+            </div>
+          )}
+
+          {activeTeamId !== null && (
             <>
               {membersLoading ? (
                 <div className="flex items-center gap-2 text-muted-foreground text-sm">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Loading members...
                 </div>
-              ) : members.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No members in this team</p>
+              ) : filteredMembers.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {members.length === 0 ? 'No members in this team' : 'No members match the role filter'}
+                </p>
               ) : (
                 <Table>
                   <TableHeader>
@@ -286,14 +243,14 @@ export function TeamPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {members.map((member) => (
+                    {filteredMembers.map((member) => (
                       <MemberRow
                         key={member.accountId}
                         member={member}
                         roles={roles}
                         billingRates={billingRates}
                         projectId={selectedProject?.projectId}
-                        teamId={selectedTeamId}
+                        teamId={activeTeamId}
                       />
                     ))}
                   </TableBody>

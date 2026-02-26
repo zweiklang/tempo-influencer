@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { BarChart3, Users, Target, Settings } from 'lucide-react';
+import { BarChart3, Users, Target, Settings, Shield } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface LayoutProps {
@@ -10,6 +10,7 @@ interface LayoutProps {
 const navItems = [
   { to: '/', icon: BarChart3, label: 'Worklogs', exact: true },
   { to: '/team', icon: Users, label: 'Team', exact: false },
+  { to: '/roles', icon: Shield, label: 'Roles', exact: false },
   { to: '/budget-delta', icon: Target, label: 'Budget Delta', exact: false },
 ];
 

@@ -30,10 +30,13 @@ export function useBillingRates(projectId: string | undefined) {
 export function useSaveBillingRateOverride() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: unknown) => api.put('/api/team/billing-rates/override', data),
-    onSuccess: (_: unknown, vars: unknown) => {
-      const v = vars as { projectId: string };
-      qc.invalidateQueries({ queryKey: ['billing-rates', v.projectId] });
+    mutationFn: (data: { accountId: string; projectId: string; rate: number }) =>
+      api.put('/api/team/billing-rates/override', {
+        accountId: data.accountId,
+        billingRate: data.rate,
+      }),
+    onSuccess: (_: unknown, vars: { accountId: string; projectId: string; rate: number }) => {
+      qc.invalidateQueries({ queryKey: ['billing-rates', vars.projectId] });
     },
   });
 }
