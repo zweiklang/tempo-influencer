@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { eachDayOfInterval, parseISO, getDay, format } from 'date-fns';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,14 +10,18 @@ import { Checkbox } from '@/components/ui/checkbox';
 import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from '@/components/ui/table';
+import { Combobox } from '@/components/ui/combobox';
 import { useRevenue } from '@/hooks/useWorklogs';
-import { useRoles, useBillingRates, useTeams, useTeamMembers } from '@/hooks/useTeam';
+import { useBillingRates, useTeams, useTeamMembers } from '@/hooks/useTeam';
 import { useOpenIssues } from '@/hooks/useIssues';
 import { useAppStore } from '@/store/appStore';
 import { useToast } from '@/components/ui/use-toast';
 import { api } from '@/api/apiClient';
 import { formatCurrency, formatHours, formatDate } from '@/lib/utils';
-import { ChevronRight, ChevronLeft, Loader2, RefreshCw, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
+import {
+  ChevronRight, ChevronLeft, ChevronDown, ChevronUp,
+  Loader2, RefreshCw, CheckCircle, XCircle,
+} from 'lucide-react';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,13 +41,12 @@ interface HourBreakdown {
   revenueContribution: number;
 }
 
-interface Assignment {
-  accountId: string;
-  displayName: string;
+interface IssueConfig {
   issueId: number;
   issueKey: string;
   issueName: string;
-  totalHours: number;
+  roleIds: number[];
+  complexity: number;
 }
 
 interface ScheduledEntry {
@@ -51,6 +55,7 @@ interface ScheduledEntry {
   issueId: number;
   issueKey: string;
   issueName: string;
+  roleId?: number;
   startDate: string;
   hours: number;
   overflow?: boolean;
@@ -67,26 +72,15 @@ interface SubmitResult {
   error?: string;
 }
 
-interface Role {
-  id: number;
-  name: string;
-}
-
-interface BillingRate {
-  accountId?: string;
-  roleId?: number;
-  rate: number;
-  source: string;
-}
-
 interface BillingRatesData {
-  rates: BillingRate[];
+  rates?: Array<{ roleId?: number; accountId?: string; rate: number; source: string }>;
 }
 
 interface TeamMember {
   accountId: string;
   displayName: string;
-  roleId?: number;
+  roleId?: number | null;
+  roleName?: string | null;
 }
 
 interface Issue {
@@ -210,7 +204,7 @@ function Step1({
   );
 }
 
-// ─── Step 2: Roles ───────────────────────────────────────────────────────────
+// ─── Step 2: Roles (team-derived) ────────────────────────────────────────────
 
 function Step2({
   selectedRoles,
@@ -223,6 +217,7 @@ function Step2({
   to,
   onNext,
   onBack,
+  onMemberNamesChange,
 }: {
   selectedRoles: RoleConfig[];
   onRolesChange: (r: RoleConfig[]) => void;
@@ -234,16 +229,15 @@ function Step2({
   to: string;
   onNext: () => void;
   onBack: () => void;
+  onMemberNamesChange: (names: Record<string, string>) => void;
 }) {
   const { selectedProject } = useAppStore();
-  const { data: rolesData } = useRoles();
   const { data: teamsData } = useTeams();
   const { data: billingRatesData } = useBillingRates(selectedProject?.projectId);
 
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
   const { data: membersData } = useTeamMembers(selectedTeamId);
 
-  const roles = (rolesData as Role[]) || [];
   const teams = (teamsData as Array<{ id: number; name: string }>) || [];
   const members = (membersData as TeamMember[]) || [];
   const billingRates = billingRatesData as BillingRatesData | undefined;
@@ -251,12 +245,36 @@ function Step2({
   const [isCalculating, setIsCalculating] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Derive unique roles from the loaded team members
+  const teamRoles = useMemo(
+    () =>
+      [...new Map(
+        members
+          .filter(m => m.roleId != null)
+          .map(m => [m.roleId, { id: m.roleId!, name: m.roleName ?? '' }])
+      ).values()].filter(r => r.name !== ''),
+    [members]
+  );
+
+  // Build and pass up member names map when members load
+  useEffect(() => {
+    if (members.length > 0) {
+      const names = Object.fromEntries(members.map(m => [m.accountId, m.displayName]));
+      onMemberNamesChange(names);
+    }
+  }, [members]);
+
+  // Reset selected roles when switching teams
+  useEffect(() => {
+    onRolesChange([]);
+  }, [selectedTeamId]);
+
   const getRateForRole = useCallback((roleId: number): number => {
     const rateEntry = billingRates?.rates?.find((r) => r.roleId === roleId);
     return rateEntry?.rate ?? 0;
   }, [billingRates]);
 
-  const toggleRole = (role: Role) => {
+  const toggleRole = (role: { id: number; name: string }) => {
     const exists = selectedRoles.find((r) => r.roleId === role.id);
     if (exists) {
       onRolesChange(selectedRoles.filter((r) => r.roleId !== role.id));
@@ -287,7 +305,7 @@ function Step2({
     updateRole(roleId, { accountIds: ids, memberCount: ids.length || 1 });
   };
 
-  // Debounced calculate
+  // Debounced hour calculation
   useEffect(() => {
     if (selectedRoles.length === 0) {
       onBreakdownChange([]);
@@ -322,96 +340,99 @@ function Step2({
     <div className="space-y-6">
       <div>
         <h3 className="text-lg font-semibold">Step 2: Configure Roles & Members</h3>
-        <p className="text-muted-foreground text-sm mt-1">Select roles and assign members to fill the revenue gap</p>
+        <p className="text-muted-foreground text-sm mt-1">Select a team, then pick roles and assign members</p>
       </div>
 
-      {/* Team selector for member lookup */}
-      {teams.length > 0 && (
-        <div className="grid gap-1.5 max-w-xs">
-          <Label>Load Members from Team</Label>
-          <select
-            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-            value={selectedTeamId?.toString() || ''}
-            onChange={(e) => setSelectedTeamId(e.target.value ? parseInt(e.target.value) : null)}
-          >
-            <option value="">Select team...</option>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
+      {/* Team selector (Combobox) */}
+      <div className="grid gap-1.5 max-w-xs">
+        <Label>Team</Label>
+        <Combobox
+          options={teams.map(t => ({ value: t.id.toString(), label: t.name }))}
+          value={selectedTeamId?.toString() ?? ''}
+          onChange={v => setSelectedTeamId(v ? parseInt(v) : null)}
+          placeholder="Select team..."
+          searchPlaceholder="Search teams..."
+        />
+      </div>
+
+      {/* Role cards — only show team-derived roles */}
+      {selectedTeamId !== null && (
+        <div className="space-y-3">
+          <Label>
+            Team Roles
+            {teamRoles.length === 0 && members.length === 0 && (
+              <span className="text-muted-foreground font-normal ml-2">
+                (loading members...)
+              </span>
+            )}
+          </Label>
+          {teamRoles.length === 0 && members.length > 0 && (
+            <p className="text-sm text-muted-foreground">No roles found in this team.</p>
+          )}
+          {teamRoles.map((role) => {
+            const config = selectedRoles.find((r) => r.roleId === role.id);
+            const isSelected = !!config;
+            // Only show members whose active role matches this role
+            const roleMembers = members.filter(m => m.roleId === role.id);
+
+            return (
+              <div key={role.id} className={`border rounded-lg p-4 transition-colors ${isSelected ? 'border-primary bg-primary/5' : ''}`}>
+                <div className="flex items-center gap-3 mb-3">
+                  <Checkbox
+                    checked={isSelected}
+                    onCheckedChange={() => toggleRole(role)}
+                    id={`role-${role.id}`}
+                  />
+                  <label htmlFor={`role-${role.id}`} className="font-medium cursor-pointer">
+                    {role.name}
+                  </label>
+                  <span className="text-xs text-muted-foreground">({roleMembers.length} members)</span>
+                </div>
+
+                {isSelected && config && (
+                  <div className="ml-7 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="grid gap-1">
+                        <Label className="text-xs">Billing Rate (EUR/h)</Label>
+                        <Input
+                          type="number"
+                          value={config.billingRate}
+                          onChange={(e) => updateRole(role.id, { billingRate: parseFloat(e.target.value) || 0 })}
+                          className="h-8 text-sm"
+                        />
+                      </div>
+                    </div>
+
+                    {roleMembers.length > 0 && (
+                      <div>
+                        <Label className="text-xs mb-1 block">Assign Members</Label>
+                        <div className="flex flex-wrap gap-2">
+                          {roleMembers.map((m) => (
+                            <button
+                              key={m.accountId}
+                              type="button"
+                              onClick={() => toggleMember(role.id, m.accountId)}
+                              className={`text-xs px-2 py-1 rounded-full border transition-colors ${
+                                config.accountIds.includes(m.accountId)
+                                  ? 'bg-primary text-primary-foreground border-primary'
+                                  : 'bg-background border-input hover:bg-accent'
+                              }`}
+                            >
+                              {m.displayName}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* Role configuration */}
-      <div className="space-y-3">
-        <Label>Available Roles</Label>
-        {roles.map((role) => {
-          const config = selectedRoles.find((r) => r.roleId === role.id);
-          const isSelected = !!config;
-          return (
-            <div key={role.id} className={`border rounded-lg p-4 transition-colors ${isSelected ? 'border-primary bg-primary/5' : ''}`}>
-              <div className="flex items-center gap-3 mb-3">
-                <Checkbox
-                  checked={isSelected}
-                  onCheckedChange={() => toggleRole(role)}
-                  id={`role-${role.id}`}
-                />
-                <label htmlFor={`role-${role.id}`} className="font-medium cursor-pointer">{role.name}</label>
-              </div>
-
-              {isSelected && config && (
-                <div className="ml-7 space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="grid gap-1">
-                      <Label className="text-xs">Billing Rate (EUR/h)</Label>
-                      <Input
-                        type="number"
-                        value={config.billingRate}
-                        onChange={(e) => updateRole(role.id, { billingRate: parseFloat(e.target.value) || 0 })}
-                        className="h-8 text-sm"
-                      />
-                    </div>
-                    <div className="grid gap-1">
-                      <Label className="text-xs">Member Count</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={config.memberCount}
-                        onChange={(e) => updateRole(role.id, { memberCount: parseInt(e.target.value) || 1 })}
-                        className="h-8 text-sm"
-                      />
-                    </div>
-                  </div>
-
-                  {members.length > 0 && (
-                    <div>
-                      <Label className="text-xs mb-1 block">Assign Members</Label>
-                      <div className="flex flex-wrap gap-2">
-                        {members.map((m) => (
-                          <button
-                            key={m.accountId}
-                            type="button"
-                            onClick={() => toggleMember(role.id, m.accountId)}
-                            className={`text-xs px-2 py-1 rounded-full border transition-colors ${
-                              config.accountIds.includes(m.accountId)
-                                ? 'bg-primary text-primary-foreground border-primary'
-                                : 'bg-background border-input hover:bg-accent'
-                            }`}
-                          >
-                            {m.displayName}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Live preview */}
+      {/* Live hour breakdown preview */}
       {(hourBreakdown.length > 0 || isCalculating) && (
         <Card>
           <CardHeader className="pb-2">
@@ -455,7 +476,7 @@ function Step2({
           disabled={selectedRoles.length === 0 || isCalculating}
           className="flex-1"
         >
-          Next: Assign Issues
+          Next: Assign Roles to Issues
           <ChevronRight className="ml-2 h-4 w-4" />
         </Button>
       </div>
@@ -463,96 +484,95 @@ function Step2({
   );
 }
 
-// ─── Step 3: Assignments ──────────────────────────────────────────────────────
+// ─── Step 3: Issue-centric role assignment ───────────────────────────────────
 
 function Step3({
   selectedRoles,
-  hourBreakdown,
-  assignments,
-  onAssignmentsChange,
+  issueConfigs,
+  onIssueConfigsChange,
   onNext,
   onBack,
 }: {
   selectedRoles: RoleConfig[];
-  hourBreakdown: HourBreakdown[];
-  assignments: Assignment[];
-  onAssignmentsChange: (a: Assignment[]) => void;
+  issueConfigs: IssueConfig[];
+  onIssueConfigsChange: (c: IssueConfig[]) => void;
   onNext: () => void;
   onBack: () => void;
 }) {
   const { data: issuesData, isLoading: issuesLoading } = useOpenIssues();
-  const [issueSearch, setIssueSearch] = useState('');
-
   const issues = (issuesData as Issue[]) || [];
-  const filteredIssues = issues.filter((i) =>
-    !issueSearch ||
-    i.key.toLowerCase().includes(issueSearch.toLowerCase()) ||
-    i.summary.toLowerCase().includes(issueSearch.toLowerCase())
-  );
 
-  // Collect all unique members from selected roles
-  const allMembers: Array<{ accountId: string; displayName: string; roleId: number }> = [];
-  for (const role of selectedRoles) {
-    for (const accountId of role.accountIds) {
-      if (!allMembers.find((m) => m.accountId === accountId)) {
-        allMembers.push({ accountId, displayName: accountId, roleId: role.roleId });
-      }
-    }
-  }
+  const [roleSearch, setRoleSearch] = useState<Record<number, string>>({});
+  const [dropdownOpen, setDropdownOpen] = useState<Record<number, boolean>>({});
 
-  const getHoursForMember = (accountId: string): number => {
-    const role = selectedRoles.find((r) => r.accountIds.includes(accountId));
-    if (!role) return 0;
-    const breakdown = hourBreakdown.find((h) => h.roleId === role.roleId);
-    return breakdown?.hoursPerMember ?? 0;
-  };
-
-  const isAssigned = (accountId: string, issueId: number): boolean =>
-    assignments.some((a) => a.accountId === accountId && a.issueId === issueId);
-
-  const getAssignment = (accountId: string, issueId: number): Assignment | undefined =>
-    assignments.find((a) => a.accountId === accountId && a.issueId === issueId);
-
-  const toggleAssignment = (member: { accountId: string; displayName: string }, issue: Issue) => {
-    const existing = getAssignment(member.accountId, issue.id);
-    if (existing) {
-      onAssignmentsChange(assignments.filter((a) => !(a.accountId === member.accountId && a.issueId === issue.id)));
-    } else {
-      onAssignmentsChange([
-        ...assignments,
-        {
-          accountId: member.accountId,
-          displayName: member.displayName,
+  // Initialize issueConfigs when issues first load
+  useEffect(() => {
+    if (issues.length > 0 && issueConfigs.length === 0) {
+      onIssueConfigsChange(
+        issues.map(issue => ({
           issueId: issue.id,
           issueKey: issue.key,
           issueName: issue.summary,
-          totalHours: getHoursForMember(member.accountId),
-        },
-      ]);
+          roleIds: [],
+          complexity: 5,
+        }))
+      );
     }
+  }, [issues]);
+
+  const getFilteredRoles = (issueId: number) => {
+    const search = (roleSearch[issueId] ?? '').toLowerCase();
+    const config = issueConfigs.find(ic => ic.issueId === issueId);
+    return selectedRoles.filter(r =>
+      r.roleName.toLowerCase().includes(search) &&
+      !(config?.roleIds.includes(r.roleId) ?? false)
+    );
   };
 
-  const updateHours = (accountId: string, issueId: number, hours: number) => {
-    onAssignmentsChange(
-      assignments.map((a) =>
-        a.accountId === accountId && a.issueId === issueId ? { ...a, totalHours: hours } : a
+  const addRoleToIssue = (issueId: number, roleId: number) => {
+    onIssueConfigsChange(
+      issueConfigs.map(ic =>
+        ic.issueId === issueId
+          ? { ...ic, roleIds: [...ic.roleIds, roleId] }
+          : ic
+      )
+    );
+    setRoleSearch(prev => ({ ...prev, [issueId]: '' }));
+    setDropdownOpen(prev => ({ ...prev, [issueId]: false }));
+  };
+
+  const removeRoleFromIssue = (issueId: number, roleId: number) => {
+    onIssueConfigsChange(
+      issueConfigs.map(ic =>
+        ic.issueId === issueId
+          ? { ...ic, roleIds: ic.roleIds.filter(id => id !== roleId) }
+          : ic
       )
     );
   };
 
-  if (allMembers.length === 0) {
+  const setComplexity = (issueId: number, complexity: number) => {
+    onIssueConfigsChange(
+      issueConfigs.map(ic =>
+        ic.issueId === issueId ? { ...ic, complexity } : ic
+      )
+    );
+  };
+
+  const hasAnyAssignment = issueConfigs.some(ic => ic.roleIds.length > 0);
+
+  if (issuesLoading) {
     return (
       <div className="space-y-6">
-        <div>
-          <h3 className="text-lg font-semibold">Step 3: Assign Issues</h3>
-          <p className="text-muted-foreground text-sm mt-1">No members assigned to roles. Go back and add members.</p>
+        <h3 className="text-lg font-semibold">Step 3: Assign Roles to Issues</h3>
+        <div className="flex items-center gap-2 text-muted-foreground py-8">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading open issues...
         </div>
-        <div className="flex gap-3">
-          <Button variant="outline" onClick={onBack}>
-            <ChevronLeft className="mr-2 h-4 w-4" />
-            Back
-          </Button>
-        </div>
+        <Button variant="outline" onClick={onBack}>
+          <ChevronLeft className="mr-2 h-4 w-4" />
+          Back
+        </Button>
       </div>
     );
   }
@@ -560,73 +580,130 @@ function Step3({
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-semibold">Step 3: Assign Issues to Members</h3>
-        <p className="text-muted-foreground text-sm mt-1">Check cells to assign issues; edit hours as needed</p>
+        <h3 className="text-lg font-semibold">Step 3: Assign Roles to Issues</h3>
+        <p className="text-muted-foreground text-sm mt-1">
+          Assign roles to each issue and set complexity weight (1–10). Issues with no roles are skipped.
+        </p>
       </div>
 
-      <div className="grid gap-1.5">
-        <Label>Filter Issues</Label>
-        <Input
-          placeholder="Search by key or summary..."
-          value={issueSearch}
-          onChange={(e) => setIssueSearch(e.target.value)}
-          className="max-w-md"
-        />
-      </div>
-
-      {issuesLoading ? (
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Loading open issues...
-        </div>
-      ) : (
-        <div className="overflow-auto border rounded-lg">
-          <table className="w-full text-sm">
-            <thead className="bg-muted">
-              <tr>
-                <th className="text-left px-3 py-2 font-medium sticky left-0 bg-muted z-10 min-w-32">Member</th>
-                {filteredIssues.slice(0, 20).map((issue) => (
-                  <th key={issue.id} className="text-center px-2 py-2 font-medium min-w-24">
-                    <div className="font-mono text-xs">{issue.key}</div>
-                    <div className="text-xs text-muted-foreground truncate max-w-20">{issue.summary.substring(0, 30)}</div>
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {allMembers.map((member) => (
-                <tr key={member.accountId} className="border-t hover:bg-muted/30">
-                  <td className="px-3 py-2 font-medium sticky left-0 bg-background z-10">
-                    {member.displayName}
-                    <div className="text-xs text-muted-foreground">{formatHours(getHoursForMember(member.accountId))}</div>
-                  </td>
-                  {filteredIssues.slice(0, 20).map((issue) => {
-                    const assignment = getAssignment(member.accountId, issue.id);
-                    return (
-                      <td key={issue.id} className="px-2 py-2 text-center">
-                        <div className="flex flex-col items-center gap-1">
-                          <Checkbox
-                            checked={!!assignment}
-                            onCheckedChange={() => toggleAssignment(member, issue)}
-                          />
-                          {assignment && (
-                            <Input
-                              type="number"
-                              value={assignment.totalHours}
-                              onChange={(e) => updateHours(member.accountId, issue.id, parseFloat(e.target.value) || 0)}
-                              className="w-16 h-6 text-xs px-1"
-                            />
-                          )}
-                        </div>
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {issueConfigs.length === 0 && (
+        <div className="rounded-md border border-dashed px-6 py-10 text-center text-sm text-muted-foreground">
+          No open issues found for this project.
+          <br />
+          <span className="text-xs">Check that the Jira project key is configured correctly in Settings.</span>
         </div>
       )}
+
+      <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+        {issueConfigs.map(ic => {
+          const hasRoles = ic.roleIds.length > 0;
+          const filtered = getFilteredRoles(ic.issueId);
+          return (
+            <div
+              key={ic.issueId}
+              className={`border rounded-lg p-4 transition-colors ${hasRoles ? 'border-primary/50 bg-primary/5' : 'opacity-60'}`}
+            >
+              {/* Issue header */}
+              <div className="flex items-start gap-2 mb-3">
+                <span className="font-mono text-xs bg-secondary px-1.5 py-0.5 rounded shrink-0 mt-0.5">
+                  {ic.issueKey}
+                </span>
+                <span className="text-sm font-medium line-clamp-2">{ic.issueName}</span>
+              </div>
+
+              <div className="grid grid-cols-[1fr_160px] gap-4 items-start">
+                {/* Role autocomplete */}
+                <div>
+                  <Label className="text-xs mb-1 block">Roles</Label>
+                  {ic.roleIds.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-2">
+                      {ic.roleIds.map(roleId => {
+                        const rc = selectedRoles.find(r => r.roleId === roleId);
+                        return rc ? (
+                          <span
+                            key={roleId}
+                            className="flex items-center gap-1 text-xs bg-primary text-primary-foreground px-2 py-0.5 rounded-full"
+                          >
+                            {rc.roleName}
+                            <button
+                              type="button"
+                              onClick={() => removeRoleFromIssue(ic.issueId, roleId)}
+                              className="ml-0.5 opacity-70 hover:opacity-100 leading-none"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ) : null;
+                      })}
+                    </div>
+                  )}
+                  <div className="relative">
+                    <Input
+                      value={roleSearch[ic.issueId] ?? ''}
+                      onChange={e => {
+                        setRoleSearch(prev => ({ ...prev, [ic.issueId]: e.target.value }));
+                        setDropdownOpen(prev => ({ ...prev, [ic.issueId]: true }));
+                      }}
+                      onFocus={() => setDropdownOpen(prev => ({ ...prev, [ic.issueId]: true }))}
+                      onBlur={() =>
+                        setTimeout(
+                          () => setDropdownOpen(prev => ({ ...prev, [ic.issueId]: false })),
+                          150
+                        )
+                      }
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && filtered.length > 0) {
+                          addRoleToIssue(ic.issueId, filtered[0].roleId);
+                        }
+                      }}
+                      placeholder={selectedRoles.length === 0 ? 'No roles — go back to Step 2' : 'Add role...'}
+                      className="h-8 text-sm"
+                      disabled={selectedRoles.length === 0}
+                    />
+                    {dropdownOpen[ic.issueId] && filtered.length > 0 && (
+                      <div className="absolute top-full left-0 right-0 z-20 border bg-background shadow-md rounded-md mt-1 max-h-40 overflow-auto">
+                        {filtered.map(role => (
+                          <button
+                            key={role.roleId}
+                            type="button"
+                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-accent"
+                            onMouseDown={e => {
+                              e.preventDefault();
+                              addRoleToIssue(ic.issueId, role.roleId);
+                            }}
+                          >
+                            {role.roleName}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Complexity slider */}
+                <div>
+                  <Label className="text-xs mb-1 block">
+                    Complexity: <span className="font-bold">{ic.complexity}</span>
+                  </Label>
+                  <input
+                    type="range"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={ic.complexity}
+                    onChange={e => setComplexity(ic.issueId, parseInt(e.target.value))}
+                    className="w-full accent-primary"
+                  />
+                  <div className="flex justify-between text-xs text-muted-foreground mt-0.5">
+                    <span>1</span>
+                    <span>10</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
       <div className="flex gap-3">
         <Button variant="outline" onClick={onBack}>
@@ -635,7 +712,7 @@ function Step3({
         </Button>
         <Button
           onClick={onNext}
-          disabled={assignments.length === 0}
+          disabled={!hasAnyAssignment}
           className="flex-1"
         >
           Next: Preview Distribution
@@ -646,32 +723,41 @@ function Step3({
   );
 }
 
-// ─── Step 4: Preview ──────────────────────────────────────────────────────────
+// ─── Step 4: Preview (revenue summary + issue table + calendar) ───────────────
 
 function Step4({
-  assignments,
+  issueConfigs,
   selectedRoles,
+  hourBreakdown,
+  memberNames,
   from,
   to,
   schedule,
   onScheduleChange,
+  currentRevenue,
+  targetRevenue,
   onNext,
   onBack,
 }: {
-  assignments: Assignment[];
+  issueConfigs: IssueConfig[];
   selectedRoles: RoleConfig[];
+  hourBreakdown: HourBreakdown[];
+  memberNames: Record<string, string>;
   from: string;
   to: string;
   schedule: ScheduledEntry[];
   onScheduleChange: (s: ScheduledEntry[]) => void;
+  currentRevenue: number;
+  targetRevenue: number;
   onNext: () => void;
   onBack: () => void;
 }) {
   const [isDistributing, setIsDistributing] = useState(false);
   const [seed, setSeed] = useState(Date.now());
+  const [expandedIssueId, setExpandedIssueId] = useState<number | null>(null);
 
-  const getBillingRate = (accountId: string): number => {
-    const role = selectedRoles.find((r) => r.accountIds.includes(accountId));
+  const getBillingRate = (roleId: number): number => {
+    const role = selectedRoles.find(r => r.roleId === roleId);
     return role?.billingRate ?? 0;
   };
 
@@ -679,7 +765,14 @@ function Step4({
     setIsDistributing(true);
     try {
       const result = await api.post<{ schedule: ScheduledEntry[] }>('/api/budget-delta/distribute', {
-        assignments,
+        issueConfigs: issueConfigs.filter(ic => ic.roleIds.length > 0),
+        roleConfigs: selectedRoles,
+        hourBreakdown: hourBreakdown.map(h => ({
+          roleId: h.roleId,
+          hoursPerMember: h.hoursPerMember,
+          totalHours: h.totalHours,
+        })),
+        memberNames,
         from,
         to,
         seed: currentSeed,
@@ -691,7 +784,7 @@ function Step4({
     } finally {
       setIsDistributing(false);
     }
-  }, [assignments, from, to, onScheduleChange]);
+  }, [issueConfigs, selectedRoles, hourBreakdown, memberNames, from, to, onScheduleChange]);
 
   useEffect(() => {
     distribute(seed);
@@ -703,9 +796,55 @@ function Step4({
     distribute(newSeed);
   };
 
-  const totalRevenue = schedule.reduce((sum, entry) => {
-    return sum + entry.hours * getBillingRate(entry.accountId);
-  }, 0);
+  // Working days for calendar
+  const workingDays = useMemo(() => {
+    if (!from || !to) return [];
+    try {
+      return eachDayOfInterval({ start: parseISO(from), end: parseISO(to) })
+        .filter(d => getDay(d) !== 0 && getDay(d) !== 6)
+        .map(d => format(d, 'yyyy-MM-dd'));
+    } catch {
+      return [];
+    }
+  }, [from, to]);
+
+  // Revenue stats
+  const deltaToAchieve = targetRevenue - currentRevenue;
+  const deltaAchieved = schedule.reduce(
+    (sum, entry) => sum + entry.hours * getBillingRate(entry.roleId ?? 0),
+    0
+  );
+
+  // Issues with roles assigned
+  const activeIssues = issueConfigs.filter(ic => ic.roleIds.length > 0);
+
+  const getIssueHours = (issueId: number) =>
+    schedule.filter(e => e.issueId === issueId).reduce((s, e) => s + e.hours, 0);
+
+  const getIssueRevenue = (issueId: number) =>
+    schedule.filter(e => e.issueId === issueId).reduce(
+      (s, e) => s + e.hours * getBillingRate(e.roleId ?? 0),
+      0
+    );
+
+  const getAssignedMembers = (ic: IssueConfig) =>
+    ic.roleIds.flatMap(roleId => {
+      const rc = selectedRoles.find(r => r.roleId === roleId);
+      return (rc?.accountIds ?? []).map(accountId => ({
+        accountId,
+        displayName: memberNames[accountId] ?? accountId,
+        roleId,
+      }));
+    });
+
+  // Footer role totals (only roles that contributed hours)
+  const roleTotals = selectedRoles
+    .map(role => {
+      const entries = schedule.filter(e => e.roleId === role.roleId);
+      const hours = entries.reduce((s, e) => s + e.hours, 0);
+      return { ...role, hours, revenue: hours * role.billingRate };
+    })
+    .filter(r => r.hours > 0);
 
   return (
     <div className="space-y-6">
@@ -720,18 +859,32 @@ function Step4({
         </Button>
       </div>
 
-      {/* Revenue summary */}
+      {/* Revenue summary — 4 stat cards */}
       <div className="grid grid-cols-2 gap-4">
         <Card>
           <CardContent className="pt-4">
-            <p className="text-xs text-muted-foreground">Total Entries</p>
-            <p className="text-2xl font-bold">{schedule.length}</p>
+            <p className="text-xs text-muted-foreground">Current Revenue</p>
+            <p className="text-xl font-bold">{formatCurrency(currentRevenue)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-4">
-            <p className="text-xs text-muted-foreground">Projected Revenue</p>
-            <p className="text-2xl font-bold text-green-700">{formatCurrency(totalRevenue)}</p>
+            <p className="text-xs text-muted-foreground">Target Revenue</p>
+            <p className="text-xl font-bold">{formatCurrency(targetRevenue)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <p className="text-xs text-muted-foreground">Delta to Achieve</p>
+            <p className="text-xl font-bold text-blue-700">{formatCurrency(deltaToAchieve)}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <p className="text-xs text-muted-foreground">Delta Achieved</p>
+            <p className={`text-xl font-bold ${deltaAchieved >= deltaToAchieve * 0.95 ? 'text-green-700' : 'text-amber-600'}`}>
+              {formatCurrency(deltaAchieved)}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -742,42 +895,164 @@ function Step4({
           Distributing worklogs...
         </div>
       ) : (
-        <div className="border rounded-lg overflow-auto max-h-96">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead>Member</TableHead>
-                <TableHead>Issue</TableHead>
-                <TableHead>Hours</TableHead>
-                <TableHead>Revenue</TableHead>
-                <TableHead>Note</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {schedule.map((entry, idx) => (
-                <TableRow key={idx} className={entry.overflow ? 'bg-yellow-50' : ''}>
-                  <TableCell className="whitespace-nowrap">{formatDate(entry.startDate)}</TableCell>
-                  <TableCell>{entry.displayName || entry.accountId}</TableCell>
-                  <TableCell>
-                    <span className="font-mono text-xs bg-secondary px-1 rounded">{entry.issueKey}</span>
-                    <span className="text-xs text-muted-foreground ml-2">{entry.issueName?.substring(0, 30)}</span>
-                  </TableCell>
-                  <TableCell>{formatHours(entry.hours)}</TableCell>
-                  <TableCell className="font-medium">{formatCurrency(entry.hours * getBillingRate(entry.accountId))}</TableCell>
-                  <TableCell>
-                    {entry.overflow && (
-                      <Badge variant="warning" className="flex items-center gap-1 w-fit">
-                        <AlertTriangle className="h-3 w-3" />
-                        overflow
-                      </Badge>
-                    )}
-                  </TableCell>
+        <>
+          {/* Issue breakdown table */}
+          <div className="border rounded-lg overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Issue</TableHead>
+                  <TableHead>Roles</TableHead>
+                  <TableHead className="text-center w-24">Complexity</TableHead>
+                  <TableHead className="text-right w-24">Hours</TableHead>
+                  <TableHead className="text-right w-28">Revenue</TableHead>
+                  <TableHead className="w-10" />
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+              </TableHeader>
+              <TableBody>
+                {activeIssues.map(ic => (
+                  <React.Fragment key={ic.issueId}>
+                    <TableRow>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs bg-secondary px-1.5 py-0.5 rounded shrink-0">
+                            {ic.issueKey}
+                          </span>
+                          <span className="text-xs text-muted-foreground truncate max-w-48">
+                            {ic.issueName}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {ic.roleIds.map(roleId => {
+                            const rc = selectedRoles.find(r => r.roleId === roleId);
+                            return rc ? (
+                              <Badge key={roleId} variant="secondary" className="text-xs">
+                                {rc.roleName}
+                              </Badge>
+                            ) : null;
+                          })}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-center">{ic.complexity}</TableCell>
+                      <TableCell className="text-right">{formatHours(getIssueHours(ic.issueId))}</TableCell>
+                      <TableCell className="text-right font-medium text-green-700">
+                        {formatCurrency(getIssueRevenue(ic.issueId))}
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0"
+                          onClick={() =>
+                            setExpandedIssueId(expandedIssueId === ic.issueId ? null : ic.issueId)
+                          }
+                        >
+                          {expandedIssueId === ic.issueId
+                            ? <ChevronUp className="h-4 w-4" />
+                            : <ChevronDown className="h-4 w-4" />}
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+
+                    {/* Calendar expand */}
+                    {expandedIssueId === ic.issueId && (
+                      <TableRow>
+                        <TableCell colSpan={6} className="p-0 bg-muted/20">
+                          <div className="overflow-x-auto border-t">
+                            <table className="w-full text-xs whitespace-nowrap">
+                              <thead>
+                                <tr className="border-b bg-muted/30">
+                                  <th className="sticky left-0 bg-muted/30 text-left px-3 py-1.5 min-w-40 font-medium">
+                                    Member / Role
+                                  </th>
+                                  {workingDays.map(day => (
+                                    <th key={day} className="text-center px-2 py-1.5 min-w-14 font-medium">
+                                      {format(parseISO(day), 'EEE dd')}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {getAssignedMembers(ic).map((member, mi) => (
+                                  <tr key={`${member.accountId}-${mi}`} className="border-t hover:bg-muted/10">
+                                    <td className="sticky left-0 bg-muted/20 px-3 py-1.5">
+                                      <div className="font-medium">{member.displayName}</div>
+                                      <div className="text-muted-foreground">
+                                        {selectedRoles.find(r => r.roleId === member.roleId)?.roleName}
+                                      </div>
+                                    </td>
+                                    {workingDays.map(day => {
+                                      const entry = schedule.find(
+                                        e =>
+                                          e.issueId === ic.issueId &&
+                                          e.accountId === member.accountId &&
+                                          e.startDate === day
+                                      );
+                                      return (
+                                        <td
+                                          key={day}
+                                          className={`text-center px-2 py-1.5 ${entry?.overflow ? 'bg-yellow-100' : ''}`}
+                                        >
+                                          {entry ? entry.hours : '–'}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </React.Fragment>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+
+          {/* Footer role totals */}
+          {roleTotals.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">Role Totals</CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Role</TableHead>
+                      <TableHead className="text-right">Total Hours</TableHead>
+                      <TableHead className="text-right">Revenue</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {roleTotals.map(r => (
+                      <TableRow key={r.roleId}>
+                        <TableCell>{r.roleName}</TableCell>
+                        <TableCell className="text-right">{formatHours(r.hours)}</TableCell>
+                        <TableCell className="text-right font-medium text-green-700">
+                          {formatCurrency(r.revenue)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    <TableRow className="font-bold border-t-2">
+                      <TableCell>Grand Total</TableCell>
+                      <TableCell className="text-right">
+                        {formatHours(roleTotals.reduce((s, r) => s + r.hours, 0))}
+                      </TableCell>
+                      <TableCell className="text-right text-green-700">
+                        {formatCurrency(deltaAchieved)}
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+        </>
       )}
 
       <div className="flex gap-3">
@@ -985,9 +1260,10 @@ export function BudgetDeltaPage() {
   // Step 2
   const [selectedRoles, setSelectedRoles] = useState<RoleConfig[]>([]);
   const [hourBreakdown, setHourBreakdown] = useState<HourBreakdown[]>([]);
+  const [memberNames, setMemberNames] = useState<Record<string, string>>({});
 
   // Step 3
-  const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [issueConfigs, setIssueConfigs] = useState<IssueConfig[]>([]);
 
   // Step 4
   const [schedule, setSchedule] = useState<ScheduledEntry[]>([]);
@@ -995,7 +1271,7 @@ export function BudgetDeltaPage() {
   const { data: revenueData } = useRevenue();
   const currentRevenue = (revenueData as { totalRevenue: number } | undefined)?.totalRevenue ?? 0;
 
-  const stepLabels = ['Target', 'Roles', 'Assign', 'Preview', 'Submit'];
+  const stepLabels = ['Target', 'Roles', 'Issues', 'Preview', 'Submit'];
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -1038,15 +1314,15 @@ export function BudgetDeltaPage() {
               to={to}
               onNext={() => setStep(3)}
               onBack={() => setStep(1)}
+              onMemberNamesChange={setMemberNames}
             />
           )}
 
           {step === 3 && (
             <Step3
               selectedRoles={selectedRoles}
-              hourBreakdown={hourBreakdown}
-              assignments={assignments}
-              onAssignmentsChange={setAssignments}
+              issueConfigs={issueConfigs}
+              onIssueConfigsChange={setIssueConfigs}
               onNext={() => setStep(4)}
               onBack={() => setStep(2)}
             />
@@ -1054,12 +1330,16 @@ export function BudgetDeltaPage() {
 
           {step === 4 && (
             <Step4
-              assignments={assignments}
+              issueConfigs={issueConfigs}
               selectedRoles={selectedRoles}
+              hourBreakdown={hourBreakdown}
+              memberNames={memberNames}
               from={from}
               to={to}
               schedule={schedule}
               onScheduleChange={setSchedule}
+              currentRevenue={currentRevenue}
+              targetRevenue={targetRevenue}
               onNext={() => setStep(5)}
               onBack={() => setStep(3)}
             />

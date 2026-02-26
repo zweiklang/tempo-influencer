@@ -21,6 +21,10 @@ function getTempoClient() {
   return createTempoClient(decrypt(tempoTokenEnc));
 }
 
+function snapToHalf(value: number): number {
+  return Math.round(value / 0.5) * 0.5;
+}
+
 // POST /calculate
 const RoleSchema = z.object({
   roleId: z.union([z.string(), z.number()]),
@@ -47,19 +51,41 @@ router.post(
     }
 
     const result = calculateHours(parsed.data);
-    res.json(result);
+    res.json({
+      breakdown: result.roles.map(r => ({ ...r, roleId: Number(r.roleId) })),
+      totalDeltaRevenue: result.totalDeltaRevenue,
+      achievedRevenue: result.achievedRevenue,
+    });
   })
 );
 
-// POST /distribute
-const AssignmentSchema = z.object({
-  accountId: z.string().min(1),
-  issueId: z.union([z.string(), z.number()]),
-  totalHours: z.number().min(0),
+// POST /distribute — issue-centric model with complexity weighting
+const IssueConfigSchema = z.object({
+  issueId: z.number(),
+  issueKey: z.string(),
+  issueName: z.string(),
+  roleIds: z.array(z.number()),
+  complexity: z.number().min(1).max(10),
+});
+
+const RoleConfigSchema = z.object({
+  roleId: z.number(),
+  roleName: z.string(),
+  billingRate: z.number(),
+  accountIds: z.array(z.string()),
+});
+
+const HourBreakdownSchema = z.object({
+  roleId: z.number(),
+  hoursPerMember: z.number(),
+  totalHours: z.number(),
 });
 
 const DistributeBody = z.object({
-  assignments: z.array(AssignmentSchema),
+  issueConfigs: z.array(IssueConfigSchema),
+  roleConfigs: z.array(RoleConfigSchema),
+  hourBreakdown: z.array(HourBreakdownSchema),
+  memberNames: z.record(z.string()),
   from: z.string().min(1),
   to: z.string().min(1),
   seed: z.number().optional(),
@@ -86,21 +112,117 @@ router.post(
       return;
     }
 
-    const { assignments, from, to, seed } = parsed.data;
+    const { issueConfigs, roleConfigs, hourBreakdown, memberNames, from, to, seed } = parsed.data;
 
-    // Fetch existing worklogs for the date range
-    const existingWorklogs = await tempoClient.getWorklogs({
-      projectId: project.project_id,
-      from,
-      to,
-    });
+    // Build flat assignments + track roleId per (accountId, issueId)
+    const assignments: Array<{ accountId: string; issueId: number; totalHours: number }> = [];
+    const roleIdMap = new Map<string, number>(); // "accountId:issueId" → roleId
 
-    const result = distributeWorklogs({ assignments, from, to, existingWorklogs, seed });
-    res.json(result);
+    for (const roleConfig of roleConfigs) {
+      const { roleId, accountIds } = roleConfig;
+      const breakdown = hourBreakdown.find(h => h.roleId === roleId);
+      if (!breakdown || breakdown.totalHours === 0) continue;
+
+      const roleIssues = issueConfigs.filter(ic => ic.roleIds.includes(roleId));
+      if (roleIssues.length === 0) continue;
+
+      const totalWeight = roleIssues.reduce((sum, ic) => sum + ic.complexity, 0);
+
+      for (const issue of roleIssues) {
+        const issueRoleHours = breakdown.totalHours * (issue.complexity / totalWeight);
+        const memberCount = accountIds.length || 1;
+        const perMemberHours = snapToHalf(issueRoleHours / memberCount);
+        if (perMemberHours === 0) continue;
+
+        for (const accountId of accountIds) {
+          assignments.push({ accountId, issueId: issue.issueId, totalHours: perMemberHours });
+          roleIdMap.set(`${accountId}:${issue.issueId}`, roleId);
+        }
+      }
+    }
+
+    // Fetch existing worklogs for the period (best-effort — ignore errors)
+    let existingWorklogs: Awaited<ReturnType<typeof tempoClient.getWorklogs>> = [];
+    try {
+      existingWorklogs = await tempoClient.getWorklogs({
+        projectId: project.project_id,
+        from,
+        to,
+      });
+    } catch {
+      // Fall back to empty — distributor will assume full daily capacity
+    }
+
+    const { schedule: rawSchedule } = distributeWorklogs({ assignments, from, to, existingWorklogs, seed });
+
+    // Enrich schedule entries
+    const issueConfigMap = new Map(issueConfigs.map(ic => [ic.issueId, ic]));
+    const schedule = rawSchedule.map(entry => ({
+      accountId: entry.accountId,
+      displayName: memberNames[entry.accountId] ?? entry.accountId,
+      issueId: entry.issueId as number,
+      issueKey: issueConfigMap.get(entry.issueId as number)?.issueKey ?? '',
+      issueName: issueConfigMap.get(entry.issueId as number)?.issueName ?? '',
+      roleId: roleIdMap.get(`${entry.accountId}:${entry.issueId}`) ?? 0,
+      startDate: entry.date,
+      hours: entry.hours,
+      overflow: entry.overflow,
+    }));
+
+    res.json({ schedule });
   })
 );
 
-// POST /submit
+// POST /submit-worklog (single entry)
+const SubmitWorklogBody = z.object({
+  accountId: z.string().min(1),
+  issueId: z.union([z.string(), z.number()]),
+  startDate: z.string().min(1),
+  hours: z.number().min(0),
+});
+
+router.post(
+  '/submit-worklog',
+  tryCatch(async (req, res) => {
+    const parsed = SubmitWorklogBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid body', details: parsed.error.flatten() });
+      return;
+    }
+
+    const tempoClient = getTempoClient();
+    if (!tempoClient) {
+      res.status(401).json({ error: 'Tempo credentials not configured' });
+      return;
+    }
+
+    const { accountId, issueId, startDate, hours } = parsed.data;
+    const timeSpentSeconds = Math.round(hours * 3600);
+
+    const wl = await tempoClient.createWorklog({
+      issueId,
+      authorAccountId: accountId,
+      startDate,
+      startTime: '09:00:00',
+      timeSpentSeconds,
+      billableSeconds: timeSpentSeconds,
+    });
+
+    insertWorklogAudit({
+      tempo_worklog_id: wl.tempoWorklogId,
+      account_id: accountId,
+      issue_id: String(issueId),
+      start_date: startDate,
+      hours,
+      operation: 'create',
+      status: 'success',
+    });
+
+    res.json({ success: true, tempoWorklogId: wl.tempoWorklogId });
+  })
+);
+
+// POST /submit (bulk — kept for backward compatibility)
 const SubmitEntrySchema = z.object({
   accountId: z.string().min(1),
   issueId: z.union([z.string(), z.number()]),
@@ -151,11 +273,7 @@ router.post(
           status: 'success',
         });
 
-        results.push({
-          ...entry,
-          success: true,
-          tempoWorklogId: wl.tempoWorklogId,
-        });
+        results.push({ ...entry, success: true, tempoWorklogId: wl.tempoWorklogId });
       } catch (err: unknown) {
         const errorMessage = err instanceof Error ? err.message : String(err);
 
@@ -169,11 +287,7 @@ router.post(
           error_message: errorMessage,
         });
 
-        results.push({
-          ...entry,
-          success: false,
-          error: errorMessage,
-        });
+        results.push({ ...entry, success: false, error: errorMessage });
       }
     }
 
