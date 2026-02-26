@@ -4,40 +4,38 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
+import { Progress } from '@/components/ui/progress';
 import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from '@/components/ui/table';
-import { useWorklogs, useRevenue, useBudget } from '@/hooks/useWorklogs';
+import { useWorklogsStream, useBudget, type WorklogEntry } from '@/hooks/useWorklogs';
 import { useAppStore } from '@/store/appStore';
 import { formatCurrency, formatHours, formatDate } from '@/lib/utils';
-import { ArrowUpDown, Settings, Loader2 } from 'lucide-react';
+import { Settings, ChevronRight, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-interface WorklogEntry {
-  accountId: string;
-  displayName: string;
-  role?: string;
-  issueKey?: string;
-  issueSummary?: string;
-  startDate: string;
-  hours: number;
-  billingRate?: number;
-  rateSource?: 'override' | 'global' | 'project-default' | 'none';
-  revenue?: number;
-}
-
-interface RevenueData {
+interface IssueGroup {
+  issueKey: string | undefined;
+  issueSummary: string | undefined;
   totalHours: number;
   totalRevenue: number;
+  entries: WorklogEntry[];
+}
+
+interface UserGroup {
+  accountId: string;
+  displayName: string;
+  role: string | undefined;
+  billingRate: number;
+  rateSource: string;
+  totalHours: number;
+  totalRevenue: number;
+  issues: IssueGroup[];
 }
 
 interface BudgetData {
-  totalBudget: number;
-  budgetUsed?: number;
+  amount: { value: number; currencyCode: string };
 }
-
-type SortField = 'displayName' | 'role' | 'issueKey' | 'startDate' | 'hours' | 'billingRate' | 'revenue';
-type SortDir = 'asc' | 'desc';
 
 function RateSourceBadge({ source }: { source?: string }) {
   if (source === 'override') return <Badge className="ml-1 text-xs bg-blue-100 text-blue-800 border-0">override</Badge>;
@@ -46,78 +44,85 @@ function RateSourceBadge({ source }: { source?: string }) {
   return <Badge variant="destructive" className="ml-1 text-xs">none</Badge>;
 }
 
-function SkeletonRow() {
-  return (
-    <TableRow>
-      {Array.from({ length: 7 }).map((_, i) => (
-        <TableCell key={i}>
-          <div className="h-4 bg-muted animate-pulse rounded" />
-        </TableCell>
-      ))}
-    </TableRow>
-  );
-}
-
-function SortableHead({
-  field,
-  label,
-  currentSort,
-  currentDir,
-  onSort,
-}: {
-  field: SortField;
-  label: string;
-  currentSort: SortField;
-  currentDir: SortDir;
-  onSort: (f: SortField) => void;
-}) {
-  return (
-    <TableHead
-      className="cursor-pointer select-none hover:text-foreground"
-      onClick={() => onSort(field)}
-    >
-      <div className="flex items-center gap-1">
-        {label}
-        <ArrowUpDown
-          className={`h-3 w-3 transition-opacity ${currentSort === field ? 'opacity-100' : 'opacity-30'}`}
-        />
-      </div>
-    </TableHead>
-  );
-}
-
 export function WorklogsPage() {
   const { activePeriod, setActivePeriod, selectedProject, credentialsConfigured } = useAppStore();
-  const { data: worklogsData, isLoading: worklogsLoading } = useWorklogs();
-  const { data: revenueData } = useRevenue();
+  const { isLoading, progress, message, data, error } = useWorklogsStream();
   const { data: budgetData } = useBudget();
 
-  const [sortField, setSortField] = useState<SortField>('startDate');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [expandedUsers, setExpandedUsers] = useState<Set<string>>(new Set());
+  const [expandedIssues, setExpandedIssues] = useState<Set<string>>(new Set());
 
-  const worklogs = (worklogsData as WorklogEntry[]) || [];
-  const revenue = revenueData as RevenueData | undefined;
   const budget = budgetData as BudgetData | undefined;
 
-  const handleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortField(field);
-      setSortDir('asc');
-    }
-  };
+  const userGroups = useMemo<UserGroup[]>(() => {
+    if (!data) return [];
 
-  const sorted = useMemo(() => {
-    return [...worklogs].sort((a, b) => {
-      let av: string | number = a[sortField] ?? '';
-      let bv: string | number = b[sortField] ?? '';
-      if (typeof av === 'string' && typeof bv === 'string') {
-        return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    const byUser = new Map<string, WorklogEntry[]>();
+    for (const entry of data) {
+      const list = byUser.get(entry.accountId) ?? [];
+      list.push(entry);
+      byUser.set(entry.accountId, list);
+    }
+
+    const groups: UserGroup[] = [];
+    for (const [accountId, entries] of byUser) {
+      const byIssue = new Map<string, WorklogEntry[]>();
+      for (const entry of entries) {
+        const key = entry.issueKey ?? '__no_issue__';
+        const list = byIssue.get(key) ?? [];
+        list.push(entry);
+        byIssue.set(key, list);
       }
-      return sortDir === 'asc' ? (av as number) - (bv as number) : (bv as number) - (av as number);
+
+      const issues: IssueGroup[] = [];
+      for (const [issueKey, issueEntries] of byIssue) {
+        issues.push({
+          issueKey: issueKey === '__no_issue__' ? undefined : issueKey,
+          issueSummary: issueEntries[0].issueSummary,
+          totalHours: issueEntries.reduce((s, e) => s + e.hours, 0),
+          totalRevenue: issueEntries.reduce((s, e) => s + (e.revenue ?? 0), 0),
+          entries: [...issueEntries].sort((a, b) => b.startDate.localeCompare(a.startDate)),
+        });
+      }
+      issues.sort((a, b) => (a.issueKey ?? '').localeCompare(b.issueKey ?? ''));
+
+      const totalHours = entries.reduce((s, e) => s + e.hours, 0);
+      const totalRevenue = entries.reduce((s, e) => s + (e.revenue ?? 0), 0);
+      groups.push({
+        accountId,
+        displayName: entries[0].displayName,
+        role: entries[0].role,
+        billingRate: entries[0].billingRate ?? 0,
+        rateSource: entries[0].rateSource ?? 'none',
+        totalHours,
+        totalRevenue,
+        issues,
+      });
+    }
+    return groups.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }, [data]);
+
+  const totalHours = useMemo(() => userGroups.reduce((s, u) => s + u.totalHours, 0), [userGroups]);
+  const totalRevenue = useMemo(() => userGroups.reduce((s, u) => s + u.totalRevenue, 0), [userGroups]);
+
+  function toggleUser(accountId: string) {
+    setExpandedUsers((prev) => {
+      const next = new Set(prev);
+      if (next.has(accountId)) next.delete(accountId);
+      else next.add(accountId);
+      return next;
     });
-  }, [worklogs, sortField, sortDir]);
+  }
+
+  function toggleIssue(accountId: string, issueKey: string | undefined) {
+    const key = `${accountId}:${issueKey ?? '__no_issue__'}`;
+    setExpandedIssues((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   if (!credentialsConfigured && !selectedProject) {
     return (
@@ -173,7 +178,7 @@ export function WorklogsPage() {
         </CardContent>
       </Card>
 
-      {/* Revenue Summary */}
+      {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Card>
           <CardHeader className="pb-2">
@@ -181,7 +186,7 @@ export function WorklogsPage() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold">
-              {revenue ? formatHours(revenue.totalHours) : '—'}
+              {data ? formatHours(totalHours) : '—'}
             </p>
           </CardContent>
         </Card>
@@ -191,7 +196,7 @@ export function WorklogsPage() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-green-700">
-              {revenue ? formatCurrency(revenue.totalRevenue) : '—'}
+              {data ? formatCurrency(totalRevenue) : '—'}
             </p>
           </CardContent>
         </Card>
@@ -201,81 +206,138 @@ export function WorklogsPage() {
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold">
-              {budget ? formatCurrency(budget.totalBudget) : '—'}
+              {budget ? formatCurrency(budget.amount.value) : '—'}
             </p>
-            {budget && revenue && (
+            {budget && data && (
               <p className="text-xs text-muted-foreground mt-1">
-                {formatCurrency(budget.totalBudget - revenue.totalRevenue)} remaining
+                {formatCurrency(budget.amount.value - totalRevenue)} remaining
               </p>
             )}
           </CardContent>
         </Card>
       </div>
 
-      {/* Worklog Table */}
+      {/* Worklog Tree */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Worklog Entries</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortableHead field="displayName" label="User" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortableHead field="role" label="Role" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortableHead field="issueKey" label="Issue" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortableHead field="startDate" label="Date" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortableHead field="hours" label="Hours" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortableHead field="billingRate" label="Rate" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-                <SortableHead field="revenue" label="Revenue" currentSort={sortField} currentDir={sortDir} onSort={handleSort} />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {worklogsLoading
-                ? Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
-                : sorted.length === 0
-                ? (
+          {isLoading ? (
+            <div className="px-6 py-8 space-y-3">
+              <Progress value={progress} className="h-2" />
+              <p className="text-sm text-muted-foreground text-center">{message}</p>
+            </div>
+          ) : error ? (
+            <div className="px-6 py-8 text-center text-destructive text-sm">{error}</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Role</TableHead>
+                  <TableHead>Hours</TableHead>
+                  <TableHead>Rate</TableHead>
+                  <TableHead>Revenue</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {userGroups.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
                       {selectedProject
                         ? 'No worklogs found for this period'
                         : 'Select a project in Settings to view worklogs'}
                     </TableCell>
                   </TableRow>
-                )
-                : sorted.map((entry, idx) => (
-                  <TableRow key={idx}>
-                    <TableCell className="font-medium">{entry.displayName}</TableCell>
-                    <TableCell>{entry.role || <span className="text-muted-foreground">—</span>}</TableCell>
-                    <TableCell>
-                      {entry.issueKey ? (
-                        <div>
-                          <span className="font-mono text-xs bg-secondary px-1 rounded">{entry.issueKey}</span>
-                          {entry.issueSummary && (
-                            <p className="text-xs text-muted-foreground truncate max-w-48 mt-0.5">
-                              {entry.issueSummary}
-                            </p>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap">{formatDate(entry.startDate)}</TableCell>
-                    <TableCell>{formatHours(entry.hours)}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center flex-wrap gap-1">
-                        <span>{entry.billingRate != null ? formatCurrency(entry.billingRate) : '—'}</span>
-                        <RateSourceBadge source={entry.rateSource} />
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-medium">
-                      {entry.revenue != null ? formatCurrency(entry.revenue) : '—'}
-                    </TableCell>
-                  </TableRow>
-                ))}
-            </TableBody>
-          </Table>
+                ) : (
+                  userGroups.map((user) => {
+                    const userExpanded = expandedUsers.has(user.accountId);
+                    return (
+                      <React.Fragment key={user.accountId}>
+                        {/* User row */}
+                        <TableRow
+                          className="cursor-pointer hover:bg-muted/50 font-medium"
+                          onClick={() => toggleUser(user.accountId)}
+                        >
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              {userExpanded
+                                ? <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+                                : <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />}
+                              {user.displayName}
+                            </div>
+                          </TableCell>
+                          <TableCell>{user.role ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                          <TableCell>{formatHours(user.totalHours)}</TableCell>
+                          <TableCell>
+                            <div className="flex items-center flex-wrap gap-1">
+                              <span>{formatCurrency(user.billingRate)}</span>
+                              <RateSourceBadge source={user.rateSource} />
+                            </div>
+                          </TableCell>
+                          <TableCell className="font-medium text-green-700">
+                            {formatCurrency(user.totalRevenue)}
+                          </TableCell>
+                        </TableRow>
+
+                        {/* Issue rows */}
+                        {userExpanded && user.issues.map((issue) => {
+                          const issueKey = `${user.accountId}:${issue.issueKey ?? '__no_issue__'}`;
+                          const issueExpanded = expandedIssues.has(issueKey);
+                          return (
+                            <React.Fragment key={issueKey}>
+                              <TableRow
+                                className="cursor-pointer hover:bg-muted/30 bg-muted/10"
+                                onClick={() => toggleIssue(user.accountId, issue.issueKey)}
+                              >
+                                <TableCell>
+                                  <div className="flex items-center gap-2 pl-8">
+                                    {issueExpanded
+                                      ? <ChevronDown className="h-3 w-3 text-muted-foreground shrink-0" />
+                                      : <ChevronRight className="h-3 w-3 text-muted-foreground shrink-0" />}
+                                    {issue.issueKey ? (
+                                      <span>
+                                        <span className="font-mono text-xs bg-secondary px-1 rounded">{issue.issueKey}</span>
+                                        {issue.issueSummary && (
+                                          <span className="ml-2 text-xs text-muted-foreground">{issue.issueSummary}</span>
+                                        )}
+                                      </span>
+                                    ) : (
+                                      <span className="text-muted-foreground text-sm">No issue</span>
+                                    )}
+                                  </div>
+                                </TableCell>
+                                <TableCell><span className="text-muted-foreground">—</span></TableCell>
+                                <TableCell>{formatHours(issue.totalHours)}</TableCell>
+                                <TableCell><span className="text-muted-foreground">—</span></TableCell>
+                                <TableCell>{formatCurrency(issue.totalRevenue)}</TableCell>
+                              </TableRow>
+
+                              {/* Entry rows */}
+                              {issueExpanded && issue.entries.map((entry, idx) => (
+                                <TableRow key={idx} className="bg-muted/5 text-sm">
+                                  <TableCell>
+                                    <div className="pl-16 text-muted-foreground">
+                                      {formatDate(entry.startDate)}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell><span className="text-muted-foreground">—</span></TableCell>
+                                  <TableCell>{formatHours(entry.hours)}</TableCell>
+                                  <TableCell><span className="text-muted-foreground">—</span></TableCell>
+                                  <TableCell>{entry.revenue != null ? formatCurrency(entry.revenue) : '—'}</TableCell>
+                                </TableRow>
+                              ))}
+                            </React.Fragment>
+                          );
+                        })}
+                      </React.Fragment>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
     </div>

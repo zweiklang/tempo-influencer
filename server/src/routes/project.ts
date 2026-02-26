@@ -82,6 +82,125 @@ router.get(
   })
 );
 
+// GET /worklogs/stream?from=&to=  (SSE)
+router.get('/worklogs/stream', (req, res) => {
+  const from = String(req.query.from ?? '');
+  const to = String(req.query.to ?? '');
+
+  if (!from || !to) {
+    res.status(400).json({ error: 'from and to query params required' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  function emit(payload: object) {
+    res.write('data: ' + JSON.stringify(payload) + '\n\n');
+  }
+
+  async function run() {
+    try {
+      emit({ stage: 'setup', message: 'Checking project configuration...', progress: 10 });
+
+      const tempoClient = getTempoClient();
+      if (!tempoClient) {
+        emit({ stage: 'error', message: 'Tempo credentials not configured' });
+        res.end();
+        return;
+      }
+
+      const project = getSelectedProject();
+      if (!project) {
+        emit({ stage: 'error', message: 'No project selected' });
+        res.end();
+        return;
+      }
+
+      emit({ stage: 'scope', message: 'Determining project scope...', progress: 25 });
+
+      let projectDefaultRate: number | null = null;
+      if (project.tempo_id) {
+        try {
+          const detail = await tempoClient.getProject(project.tempo_id);
+          projectDefaultRate = detail.defaultBillingRate?.value || null;
+        } catch {
+          // fall through
+        }
+      }
+
+      const jiraClient = getJiraClient();
+
+      emit({ stage: 'worklogs', message: 'Fetching worklogs from Tempo...', progress: 45 });
+      const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
+
+      emit({ stage: 'members', message: 'Resolving team members...', progress: 60 });
+
+      const jiraUserMap = new Map<string, string>();
+      if (jiraClient) {
+        const uncachedIds = [...new Set(worklogs.map((wl) => wl.author.accountId))]
+          .filter((id) => !getTeamMemberCache(id));
+        for (let i = 0; i < uncachedIds.length; i += 50) {
+          const chunk = uncachedIds.slice(i, i + 50);
+          try {
+            const users = await jiraClient.getUsersByAccountIds(chunk);
+            for (const u of users) jiraUserMap.set(u.accountId, u.displayName);
+          } catch {
+            // fall through
+          }
+        }
+      }
+
+      emit({ stage: 'rates', message: 'Resolving billing rates...', progress: 75 });
+
+      const uniqueMembers = Array.from(
+        new Map(worklogs.map((wl) => [wl.author.accountId, wl.author.accountId])).values()
+      ).map((accountId) => {
+        const cached = getTeamMemberCache(accountId);
+        return { accountId, roleId: cached?.role_id ?? null };
+      });
+
+      const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
+
+      emit({ stage: 'issues', message: 'Fetching issue details from Jira...', progress: 90 });
+
+      const uniqueIssueIds = [...new Set(worklogs.map((wl) => wl.issue?.id).filter((id): id is number => id != null))];
+      const issueMap = jiraClient
+        ? await jiraClient.getIssuesByIds(uniqueIssueIds)
+        : new Map<number, { key: string; summary: string }>();
+
+      const enriched = worklogs.map((wl) => {
+        const resolved = ratesMap.get(wl.author.accountId) ?? { rate: 0, source: 'none' as const };
+        const cached = getTeamMemberCache(wl.author.accountId);
+        const issueInfo = wl.issue?.id != null ? issueMap.get(wl.issue.id) : undefined;
+        const hours = wl.timeSpentSeconds / 3600;
+        return {
+          accountId: wl.author.accountId,
+          displayName: cached?.display_name ?? jiraUserMap.get(wl.author.accountId) ?? wl.author.accountId,
+          role: cached?.role_name ?? undefined,
+          issueKey: issueInfo?.key,
+          issueSummary: issueInfo?.summary,
+          startDate: wl.startDate,
+          hours,
+          billingRate: resolved.rate,
+          rateSource: resolved.source,
+          revenue: hours * resolved.rate,
+        };
+      });
+
+      emit({ stage: 'complete', data: enriched, progress: 100 });
+      res.end();
+    } catch (err: unknown) {
+      emit({ stage: 'error', message: err instanceof Error ? err.message : 'Unknown error' });
+      res.end();
+    }
+  }
+
+  run();
+});
+
 // GET /worklogs?from=&to=
 router.get(
   '/worklogs',
