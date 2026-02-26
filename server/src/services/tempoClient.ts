@@ -7,6 +7,7 @@ import type {
   TempoRole,
   TempoGlobalRate,
   TempoFinancialProject,
+  TempoProjectDetail,
   CreateWorklogBody,
   TeamMembershipBody,
 } from '../types/tempo';
@@ -49,7 +50,8 @@ export function createTempoClient(token: string) {
 
   return {
     async getWorklogs(params: {
-      projectId?: string;
+      projectId?: string | number;
+      teamId?: number;
       accountId?: string;
       from: string;
       to: string;
@@ -62,6 +64,7 @@ export function createTempoClient(token: string) {
           offset,
         };
         if (params.projectId) queryParams.projectId = params.projectId;
+        if (params.teamId) queryParams.teamId = params.teamId;
         if (params.accountId) queryParams.accountId = params.accountId;
 
         const res = await client.get<TempoWorklogs>('worklogs', { params: queryParams });
@@ -129,6 +132,11 @@ export function createTempoClient(token: string) {
         );
         return res.data;
       });
+    },
+
+    async getProject(projectId: string): Promise<TempoProjectDetail> {
+      const res = await client.get<TempoProjectDetail>(`projects/${projectId}`);
+      return res.data;
     },
 
     async getProjectBudget(projectId: string): Promise<unknown> {

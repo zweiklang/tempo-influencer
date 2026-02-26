@@ -137,6 +137,22 @@ export function getTeamMemberCache(accountId: string): TeamMemberCache | null {
   return row ?? null;
 }
 
+// Returns all cached team member account IDs (used to filter worklogs to project team)
+export function getCachedTeamMemberIds(): Set<string> {
+  const rows = db
+    .prepare('SELECT account_id FROM team_member_cache')
+    .all() as { account_id: string }[];
+  return new Set(rows.map((r) => r.account_id));
+}
+
+// Returns the team_id from the first cached team member (used as worklog filter)
+export function getCachedTeamId(): number | null {
+  const row = db
+    .prepare('SELECT team_id FROM team_member_cache WHERE team_id IS NOT NULL LIMIT 1')
+    .get() as { team_id: string } | undefined;
+  return row?.team_id ? Number(row.team_id) : null;
+}
+
 // ---- Worklog Audit ----
 
 export function insertWorklogAudit(entry: WorklogAuditInsert): void {

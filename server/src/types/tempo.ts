@@ -115,3 +115,19 @@ export interface TeamMembershipBody {
   commitmentPercent: number;
   from: string;
 }
+
+export interface TempoProjectScopeSource {
+  reference: string;
+  title?: string;
+  type: string;
+  url?: string;
+}
+
+export interface TempoProjectDetail {
+  id: string;
+  name: string;
+  status: string;
+  scope?: {
+    source: TempoProjectScopeSource;
+  };
+}
