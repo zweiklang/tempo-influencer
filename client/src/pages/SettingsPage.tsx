@@ -1,11 +1,12 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Combobox } from '@/components/ui/combobox';
-import { useCredentials, useSaveCredentials, useSelectedProject, useSaveProject, useTempoProjects } from '@/hooks/useSettings';
+import { useCredentials, useSaveCredentials, useSelectedProject, useSaveProject, useTempoProjects, useGeminiSettings, useSaveGeminiSettings, useGeminiModels } from '@/hooks/useSettings';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useAppStore } from '@/store/appStore';
 import { useToast } from '@/components/ui/use-toast';
 import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
@@ -283,6 +284,138 @@ function ProjectSelector() {
   );
 }
 
+// Gemini Settings
+function GeminiSettings() {
+  const { toast } = useToast();
+  const { data: geminiSettingsData, isLoading } = useGeminiSettings();
+  const saveGeminiSettings = useSaveGeminiSettings();
+  const { data: modelsData, isLoading: modelsLoading, isError: modelsError } = useGeminiModels();
+
+  const [apiKey, setApiKey] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
+
+  const gs = geminiSettingsData as {
+    configured?: boolean;
+    geminiTokenSavedAt?: string;
+    model?: string | null;
+  } | undefined;
+
+  const models = (modelsData as { id: string; displayName: string }[]) ?? [];
+
+  // Init selectedModel from stored value or first model
+  useEffect(() => {
+    if (selectedModel) return;
+    if (gs?.model) {
+      setSelectedModel(gs.model);
+    } else if (models.length > 0) {
+      setSelectedModel(models[0].id);
+    }
+  }, [gs?.model, models, selectedModel]);
+
+  const getDaysSince = (dateStr?: string): number | null => {
+    if (!dateStr) return null;
+    const d = new Date(dateStr);
+    const now = new Date();
+    return Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+  };
+
+  const tokenDays = getDaysSince(gs?.geminiTokenSavedAt);
+
+  const handleSave = async () => {
+    try {
+      await saveGeminiSettings.mutateAsync({ apiKey: apiKey || undefined, model: selectedModel || undefined });
+      setApiKey('');
+      toast({ title: 'Gemini settings saved' });
+    } catch (err: unknown) {
+      const error = err as Error;
+      toast({ title: 'Failed to save', description: error.message, variant: 'destructive' });
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 text-muted-foreground p-4">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading Gemini status...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {gs?.configured ? (
+        <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 rounded-md px-3 py-2">
+          <CheckCircle className="h-4 w-4" />
+          API key configured
+          {tokenDays !== null && (
+            <span className="text-xs text-green-600 ml-auto">
+              {tokenDays === 0 ? 'Saved just now' : `Saved ${tokenDays} day${tokenDays === 1 ? '' : 's'} ago`}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted rounded-md px-3 py-2">
+          <AlertCircle className="h-4 w-4" />
+          Not configured
+        </div>
+      )}
+
+      <div className="grid gap-2">
+        <Label htmlFor="geminiApiKey">API Key</Label>
+        <Input
+          id="geminiApiKey"
+          type="password"
+          placeholder={gs?.configured ? 'Leave blank to keep existing key' : 'AIza…'}
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </div>
+
+      <div className="grid gap-2">
+        <Label>Model</Label>
+        {modelsLoading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Verifying key…
+          </div>
+        ) : models.length === 0 ? (
+          <Select disabled>
+            <SelectTrigger>
+              <SelectValue placeholder={gs?.configured ? 'Verifying key…' : 'Save API key first'} />
+            </SelectTrigger>
+            <SelectContent />
+          </Select>
+        ) : (
+          <Select value={selectedModel} onValueChange={setSelectedModel}>
+            <SelectTrigger>
+              <SelectValue placeholder="Select a model…" />
+            </SelectTrigger>
+            <SelectContent>
+              {models.map((m) => (
+                <SelectItem key={m.id} value={m.id}>{m.displayName}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        {modelsError && (
+          <p className="text-xs text-destructive">Could not load models — check that the API key is valid.</p>
+        )}
+      </div>
+
+      <Button onClick={handleSave} disabled={saveGeminiSettings.isPending || (!apiKey && !selectedModel)}>
+        {saveGeminiSettings.isPending ? (
+          <>
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            Saving...
+          </>
+        ) : (
+          'Save'
+        )}
+      </Button>
+    </div>
+  );
+}
+
 export function SettingsPage() {
   return (
     <div className="space-y-6 max-w-2xl">
@@ -306,6 +439,15 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent>
           <ProjectSelector />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Gemini AI</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <GeminiSettings />
         </CardContent>
       </Card>
     </div>

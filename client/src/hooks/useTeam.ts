@@ -40,6 +40,15 @@ export function useSaveBillingRateOverride() {
   });
 }
 
+export function useSaveRoleDescriptions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (descriptions: Record<number, string>) =>
+      api.put('/api/team/roles/descriptions', { descriptions }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['roles'] }),
+  });
+}
+
 export function useCreateRole() {
   const qc = useQueryClient();
   return useMutation({

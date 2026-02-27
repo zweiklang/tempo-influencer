@@ -25,7 +25,7 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
       const res = await client.post<{ issues: JiraIssue[] }>('search/jql', {
         jql,
         maxResults: 200,
-        fields: ['summary', 'status', 'assignee'],
+        fields: ['summary', 'status', 'assignee', 'issuetype', 'labels', 'parent'],
       });
       return res.data.issues;
     },

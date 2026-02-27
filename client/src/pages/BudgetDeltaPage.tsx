@@ -14,14 +14,18 @@ import { Combobox } from '@/components/ui/combobox';
 import { useRevenue } from '@/hooks/useWorklogs';
 import { useBillingRates, useTeams, useTeamMembers } from '@/hooks/useTeam';
 import { useOpenIssues } from '@/hooks/useIssues';
+import { useGeminiSettings } from '@/hooks/useSettings';
 import { useAppStore } from '@/store/appStore';
 import { useToast } from '@/components/ui/use-toast';
 import { api } from '@/api/apiClient';
 import { formatCurrency, formatHours, formatDate } from '@/lib/utils';
 import {
   ChevronRight, ChevronLeft, ChevronDown, ChevronUp,
-  Loader2, RefreshCw, CheckCircle, XCircle,
+  Loader2, RefreshCw, CheckCircle, XCircle, Wand2,
 } from 'lucide-react';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from '@/components/ui/dialog';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,6 +51,10 @@ interface IssueConfig {
   issueName: string;
   roleIds: number[];
   complexity: number;
+  statusCategory?: string | null;
+  issueType?: string | null;
+  labels?: string[];
+  parentSummary?: string | null;
 }
 
 interface ScheduledEntry {
@@ -87,6 +95,10 @@ interface Issue {
   id: number;
   key: string;
   summary: string;
+  statusCategory?: string | null;
+  issueType?: string | null;
+  labels?: string[];
+  parentSummary?: string | null;
 }
 
 // ─── Step Indicator ──────────────────────────────────────────────────────────
@@ -548,8 +560,69 @@ function Step3({
   const { data: issuesData, isLoading: issuesLoading } = useOpenIssues();
   const issues = (issuesData as Issue[]) || [];
 
+  const { toast } = useToast();
   const [roleSearch, setRoleSearch] = useState<Record<number, string>>({});
   const [dropdownOpen, setDropdownOpen] = useState<Record<number, boolean>>({});
+
+  // Auto-assign state
+  const [autoAssignOpen, setAutoAssignOpen] = useState(false);
+  const [autoAssignScope, setAutoAssignScope] = useState<'all' | 'active'>('all');
+  const [autoAssignExcludeEpics, setAutoAssignExcludeEpics] = useState(false);
+  const [autoAssigning, setAutoAssigning] = useState(false);
+  const { data: geminiSettingsData } = useGeminiSettings();
+  const geminiConfigured = !!(geminiSettingsData as { configured?: boolean } | undefined)?.configured;
+
+  const matchCount = useMemo(() => {
+    let filtered = issueConfigs;
+    if (autoAssignScope === 'active') filtered = filtered.filter(ic => ic.statusCategory !== 'To Do');
+    if (autoAssignExcludeEpics) filtered = filtered.filter(ic => ic.issueType !== 'Epic');
+    return filtered.length;
+  }, [issueConfigs, autoAssignScope, autoAssignExcludeEpics]);
+
+  const handleAutoAssign = async () => {
+    if (matchCount === 0 || !geminiConfigured) return;
+    setAutoAssigning(true);
+    try {
+      let filtered = issueConfigs;
+      if (autoAssignScope === 'active') filtered = filtered.filter(ic => ic.statusCategory !== 'To Do');
+      if (autoAssignExcludeEpics) filtered = filtered.filter(ic => ic.issueType !== 'Epic');
+
+      const result = await api.post('/api/issues/suggest-roles', {
+        issues: filtered.map(ic => ({
+          id: ic.issueId,
+          key: ic.issueKey,
+          summary: ic.issueName,
+          labels: ic.labels ?? [],
+          parentSummary: ic.parentSummary ?? null,
+        })),
+        roleIds: selectedRoles.map(r => r.roleId),
+      }) as { suggestions: { issueId: number; roleIds: number[] }[] };
+
+      const suggestions = result.suggestions;
+      const validRoleIds = new Set(selectedRoles.map(r => r.roleId));
+      let assigned = 0;
+      onIssueConfigsChange(
+        issueConfigs.map(ic => {
+          const suggestion = suggestions.find(s => s.issueId === ic.issueId);
+          if (suggestion && suggestion.roleIds.length > 0) {
+            const validIds = suggestion.roleIds.filter(id => validRoleIds.has(id));
+            if (validIds.length > 0) {
+              assigned++;
+              return { ...ic, roleIds: validIds };
+            }
+          }
+          return ic;
+        })
+      );
+      setAutoAssignOpen(false);
+      toast({ title: `Auto-assigned roles to ${assigned} issues` });
+    } catch (err: unknown) {
+      const error = err as Error;
+      toast({ title: 'Auto-assign failed', description: error.message, variant: 'destructive' });
+    } finally {
+      setAutoAssigning(false);
+    }
+  };
 
   // Initialize issueConfigs when issues first load
   useEffect(() => {
@@ -561,6 +634,10 @@ function Step3({
           issueName: issue.summary,
           roleIds: [],
           complexity: 5,
+          statusCategory: issue.statusCategory,
+          issueType: issue.issueType,
+          labels: issue.labels,
+          parentSummary: issue.parentSummary,
         }))
       );
     }
@@ -625,12 +702,81 @@ function Step3({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-semibold">Step 3: Assign Roles to Issues</h3>
-        <p className="text-muted-foreground text-sm mt-1">
-          Assign roles to each issue and set complexity weight (1–10). Issues with no roles are skipped.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-lg font-semibold">Step 3: Assign Roles to Issues</h3>
+          <p className="text-muted-foreground text-sm mt-1">
+            Assign roles to each issue and set complexity weight (1–10). Issues with no roles are skipped.
+          </p>
+        </div>
+        {issueConfigs.length > 0 && selectedRoles.length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => setAutoAssignOpen(true)} className="shrink-0">
+            <Wand2 className="h-4 w-4 mr-1.5" />
+            Auto-Assign
+          </Button>
+        )}
       </div>
+
+      {/* Auto-Assign Dialog */}
+      <Dialog open={autoAssignOpen} onOpenChange={setAutoAssignOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Auto-Assign Roles with Gemini</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Issue scope</Label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAutoAssignScope('all')}
+                  className={`px-3 py-1.5 rounded-md text-sm border transition-colors ${autoAssignScope === 'all' ? 'bg-primary text-primary-foreground border-primary' : 'border-input hover:bg-accent'}`}
+                >
+                  All issues
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutoAssignScope('active')}
+                  className={`px-3 py-1.5 rounded-md text-sm border transition-colors ${autoAssignScope === 'active' ? 'bg-primary text-primary-foreground border-primary' : 'border-input hover:bg-accent'}`}
+                >
+                  Active only (exclude To Do)
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="excludeEpics"
+                checked={autoAssignExcludeEpics}
+                onCheckedChange={(v) => setAutoAssignExcludeEpics(!!v)}
+              />
+              <Label htmlFor="excludeEpics" className="text-sm cursor-pointer">Exclude Epics</Label>
+            </div>
+            {!geminiConfigured && (
+              <div className="text-sm text-destructive">
+                Gemini API key not configured — go to Settings
+              </div>
+            )}
+            <div className={`text-sm ${matchCount === 0 ? 'text-destructive' : 'text-muted-foreground'}`}>
+              {matchCount === 0
+                ? 'No issues match this filter — try "All issues"'
+                : `${matchCount} issue${matchCount === 1 ? '' : 's'} will be processed`}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAutoAssignOpen(false)}>Cancel</Button>
+            <Button
+              onClick={handleAutoAssign}
+              disabled={autoAssigning || matchCount === 0 || !geminiConfigured}
+            >
+              {autoAssigning ? (
+                <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Assigning…</>
+              ) : (
+                <><Wand2 className="h-4 w-4 mr-1.5" />Assign</>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {issueConfigs.length === 0 && (
         <div className="rounded-md border border-dashed px-6 py-10 text-center text-sm text-muted-foreground">
