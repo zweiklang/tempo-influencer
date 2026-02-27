@@ -101,6 +101,10 @@ const DistributeBody = z.object({
   seed: z.number().optional(),
   targetRevenue: z.number().optional(),
   currentRevenue: z.number().optional(),
+  roleHourLimits: z.array(z.object({
+    roleId: z.number(),
+    maxHours: z.number().positive(),
+  })).optional(),
 });
 
 router.post(
@@ -124,7 +128,7 @@ router.post(
       return;
     }
 
-    const { issueConfigs, roleConfigs, hourBreakdown: passedBreakdown, memberNames, from, to, seed, targetRevenue, currentRevenue } = parsed.data;
+    const { issueConfigs, roleConfigs, hourBreakdown: passedBreakdown, memberNames, from, to, seed, targetRevenue, currentRevenue, roleHourLimits } = parsed.data;
 
     // Determine which roles actually have issues assigned
     const assignedRoleIds = new Set(issueConfigs.flatMap(ic => ic.roleIds));
@@ -151,6 +155,60 @@ router.post(
       }));
     } else {
       effectiveBreakdown = passedBreakdown.filter(h => assignedRoleIds.has(h.roleId));
+    }
+
+    // Apply per-role hour caps and redistribute lost revenue to uncapped roles
+    if (roleHourLimits && roleHourLimits.length > 0) {
+      const bindingLimits = roleHourLimits.filter(l => {
+        const h = effectiveBreakdown.find(b => b.roleId === l.roleId);
+        return h && h.totalHours > l.maxHours;
+      });
+
+      if (bindingLimits.length > 0) {
+        const cappedRoleIds = new Set(bindingLimits.map(l => l.roleId));
+        let lostRevenue = 0;
+
+        effectiveBreakdown = effectiveBreakdown.map(h => {
+          const limit = bindingLimits.find(l => l.roleId === h.roleId);
+          if (!limit) return h;
+          const rc = roleConfigs.find(r => r.roleId === h.roleId);
+          const billingRate = rc?.billingRate ?? 0;
+          const memberCount = rc?.accountIds.length || 1;
+          lostRevenue += (h.totalHours - limit.maxHours) * billingRate;
+          return {
+            ...h,
+            totalHours: limit.maxHours,
+            hoursPerMember: snapToHalf(limit.maxHours / memberCount),
+          };
+        });
+
+        // Redistribute lost revenue proportionally to uncapped active roles
+        const uncappedRoles = activeRoleConfigs.filter(r => !cappedRoleIds.has(r.roleId));
+        if (lostRevenue > 0 && uncappedRoles.length > 0) {
+          const extra = calculateHours({
+            targetRevenue: lostRevenue,
+            currentRevenue: 0,
+            roles: uncappedRoles.map(r => ({
+              roleId: r.roleId,
+              roleName: r.roleName,
+              billingRate: r.billingRate,
+              memberCount: r.accountIds.length || 1,
+            })),
+          });
+          effectiveBreakdown = effectiveBreakdown.map(h => {
+            if (cappedRoleIds.has(h.roleId)) return h;
+            const extraRole = extra.roles.find(r => Number(r.roleId) === h.roleId);
+            if (!extraRole || extraRole.totalHours === 0) return h;
+            const memberCount = roleConfigs.find(r => r.roleId === h.roleId)?.accountIds.length || 1;
+            const newTotal = h.totalHours + extraRole.totalHours;
+            return {
+              ...h,
+              totalHours: newTotal,
+              hoursPerMember: snapToHalf(newTotal / memberCount),
+            };
+          });
+        }
+      }
     }
 
     // Build flat assignments + track roleId per (accountId, issueId)
