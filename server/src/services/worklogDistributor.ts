@@ -53,6 +53,16 @@ function snapToHalf(value: number): number {
   return Math.round(value / 0.5) * 0.5;
 }
 
+function getWeekKey(dateStr: string): string {
+  // Returns the Monday date of the week as "yyyy-MM-dd"
+  const d = parseISO(dateStr);
+  const dow = getDay(d); // 0=Sun, 1=Mon
+  const offset = dow === 0 ? -6 : 1 - dow;
+  const monday = new Date(d);
+  monday.setDate(monday.getDate() + offset);
+  return format(monday, 'yyyy-MM-dd');
+}
+
 export function distributeWorklogs(input: DistributorInput): DistributorOutput {
   const { assignments, from, to, existingWorklogs, seed = Date.now() } = input;
 
@@ -87,61 +97,128 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
   for (const assignment of assignments) {
     const { accountId, issueId, totalHours } = assignment;
 
+    if (totalHours <= 0) continue;
+
     // Initialize capacity for this user if not done
     if (!capacityMap[accountId]) capacityMap[accountId] = {};
 
-    // Shuffle working days with deterministic seed
-    const shuffledDays = fisherYatesShuffle(workingDays, rand);
-
     let remaining = totalHours;
 
-    // Determine base hours per day for even spread
-    const availableDays = workingDays.filter((d) => (capacityMap[accountId][d] ?? 8) > 0);
-    const denominator = availableDays.length > 0 ? availableDays.length : workingDays.length;
-    const base = denominator > 0 ? totalHours / denominator : totalHours;
+    // Step 1: partition days by usable capacity
+    const goodDays = workingDays.filter((d) => (capacityMap[accountId][d] ?? 8) >= 1.0);
+    const tinyDays = workingDays.filter((d) => {
+      const cap = capacityMap[accountId][d] ?? 8;
+      return cap > 0 && cap < 1.0;
+    });
 
-    // First pass: even spread with jitter
-    for (const date of shuffledDays) {
-      if (remaining <= 0) break;
+    if (goodDays.length === 0 && tinyDays.length === 0) {
+      // All days at capacity — overflow immediately
+      const targetDay = workingDays[0];
+      if (targetDay) {
+        schedule.push({ accountId, issueId, date: targetDay, hours: remaining, overflow: true });
+      }
+      continue;
+    }
 
-      const currentCap = capacityMap[accountId][date] ?? 8;
-      if (currentCap <= 0) continue;
+    if (goodDays.length > 0) {
+      // Step 2: group goodDays by week
+      const weekMap = new Map<string, string[]>();
+      for (const d of goodDays) {
+        const wk = getWeekKey(d);
+        if (!weekMap.has(wk)) weekMap.set(wk, []);
+        weekMap.get(wk)!.push(d);
+      }
+      const goodWeeks = [...weekMap.keys()].sort();
 
-      const jitter = 0.7 + rand() * 0.6; // 0.7× – 1.3×
-      const toLog = Math.min(
-        snapToHalf(base * jitter),
-        Math.min(currentCap, remaining)
+      // Step 3: pick numTargetWeeks
+      const goodCapByWeek: Record<string, number> = {};
+      for (const wk of goodWeeks) {
+        goodCapByWeek[wk] = weekMap.get(wk)!.reduce((sum, d) => sum + (capacityMap[accountId][d] ?? 8), 0);
+      }
+      const maxWeekCap = Math.max(...Object.values(goodCapByWeek));
+      const minWeeks = Math.max(1, Math.ceil(totalHours / maxWeekCap));
+      const maxWeeks = Math.min(goodWeeks.length, 3);
+      const t = rand() * rand(); // quadratic bias → fewer weeks
+      const numTargetWeeks = Math.max(
+        minWeeks,
+        Math.min(Math.max(minWeeks, maxWeeks), Math.round(minWeeks + t * (Math.max(minWeeks, maxWeeks) - minWeeks)))
       );
-      if (toLog <= 0) continue;
 
-      schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
-      capacityMap[accountId][date] = currentCap - toLog;
-      remaining -= toLog;
-      remaining = Math.round(remaining * 100) / 100;
+      // Step 4: collect pickedDays from chosen weeks
+      const shuffledWeeks = fisherYatesShuffle(goodWeeks, rand);
+      const pickedWeeks = new Set(shuffledWeeks.slice(0, numTargetWeeks));
+      const pickedDays = goodDays.filter((d) => pickedWeeks.has(getWeekKey(d))).sort();
+
+      // Step 5: distribute totalHours across pickedDays with 1h minimum
+      for (let i = 0; i < pickedDays.length; i++) {
+        if (remaining <= 0) break;
+
+        const date = pickedDays[i];
+        const currentCap = capacityMap[accountId][date] ?? 8;
+        if (currentCap <= 0) continue;
+
+        let toLog: number;
+        if (i === pickedDays.length - 1 || remaining <= 1.0) {
+          // Last picked day, or remainder too small to guarantee 1h: take what's left
+          toLog = snapToHalf(Math.min(currentCap, remaining));
+        } else {
+          const fraction = 0.2 + rand() * 0.6; // 20–80% of remaining
+          const desired = Math.max(1.0, remaining * fraction); // 1h minimum
+          toLog = snapToHalf(Math.min(currentCap, desired));
+        }
+
+        if (toLog <= 0) continue;
+
+        schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
+        capacityMap[accountId][date] = currentCap - toLog;
+        remaining -= toLog;
+        remaining = Math.round(remaining * 100) / 100;
+      }
+
+      // Step 6: greedy fallback — expand to more goodWeeks
+      if (remaining > 0) {
+        const extraDays = goodDays.filter((d) => !pickedWeeks.has(getWeekKey(d)));
+        const shuffledExtra = fisherYatesShuffle(extraDays, rand);
+        for (const date of shuffledExtra) {
+          if (remaining <= 0) break;
+
+          const currentCap = capacityMap[accountId][date] ?? 8;
+          if (currentCap <= 0) continue;
+
+          const toLog = snapToHalf(Math.min(currentCap, remaining));
+          if (toLog <= 0) continue;
+
+          schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
+          capacityMap[accountId][date] = currentCap - toLog;
+          remaining -= toLog;
+          remaining = Math.round(remaining * 100) / 100;
+        }
+      }
     }
 
-    // Second pass: greedy fill for any remainder left after rounding
-    for (const date of shuffledDays) {
-      if (remaining <= 0) break;
-
-      const currentCap = capacityMap[accountId][date] ?? 8;
-      if (currentCap <= 0) continue;
-
-      const toLog = snapToHalf(Math.min(currentCap, remaining));
-      if (toLog <= 0) continue;
-
-      schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
-      capacityMap[accountId][date] = currentCap - toLog;
-      remaining -= toLog;
-      remaining = Math.round(remaining * 100) / 100;
-    }
-
-    // Overflow: log remaining without cap
+    // Step 7: tiny-day fallback (0.5h capacity days)
     if (remaining > 0) {
-      // Find a day with any capacity or the first working day
-      const overflowDays = shuffledDays.filter(
-        (d) => (capacityMap[accountId][d] ?? 8) >= 0
-      );
+      const shuffledTiny = fisherYatesShuffle(tinyDays, rand);
+      for (const date of shuffledTiny) {
+        if (remaining <= 0) break;
+
+        const currentCap = capacityMap[accountId][date] ?? 8;
+        if (currentCap <= 0) continue;
+
+        const toLog = snapToHalf(Math.min(currentCap, remaining));
+        if (toLog <= 0) continue;
+
+        schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
+        capacityMap[accountId][date] = currentCap - toLog;
+        remaining -= toLog;
+        remaining = Math.round(remaining * 100) / 100;
+      }
+    }
+
+    // Step 8: overflow if still remaining
+    if (remaining > 0) {
+      const shuffledAll = fisherYatesShuffle(workingDays, rand);
+      const overflowDays = shuffledAll.filter((d) => (capacityMap[accountId][d] ?? 8) >= 0);
       const targetDay = overflowDays[0] ?? workingDays[0];
 
       if (targetDay) {
