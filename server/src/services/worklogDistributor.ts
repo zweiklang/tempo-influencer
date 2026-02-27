@@ -95,7 +95,32 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
 
     let remaining = totalHours;
 
-    // Greedy fill within capacity
+    // Determine base hours per day for even spread
+    const availableDays = workingDays.filter((d) => (capacityMap[accountId][d] ?? 8) > 0);
+    const denominator = availableDays.length > 0 ? availableDays.length : workingDays.length;
+    const base = denominator > 0 ? totalHours / denominator : totalHours;
+
+    // First pass: even spread with jitter
+    for (const date of shuffledDays) {
+      if (remaining <= 0) break;
+
+      const currentCap = capacityMap[accountId][date] ?? 8;
+      if (currentCap <= 0) continue;
+
+      const jitter = 0.7 + rand() * 0.6; // 0.7× – 1.3×
+      const toLog = Math.min(
+        snapToHalf(base * jitter),
+        Math.min(currentCap, remaining)
+      );
+      if (toLog <= 0) continue;
+
+      schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
+      capacityMap[accountId][date] = currentCap - toLog;
+      remaining -= toLog;
+      remaining = Math.round(remaining * 100) / 100;
+    }
+
+    // Second pass: greedy fill for any remainder left after rounding
     for (const date of shuffledDays) {
       if (remaining <= 0) break;
 
@@ -108,7 +133,7 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
       schedule.push({ accountId, issueId, date, hours: toLog, overflow: false });
       capacityMap[accountId][date] = currentCap - toLog;
       remaining -= toLog;
-      remaining = Math.round(remaining * 100) / 100; // floating point safety
+      remaining = Math.round(remaining * 100) / 100;
     }
 
     // Overflow: log remaining without cap
