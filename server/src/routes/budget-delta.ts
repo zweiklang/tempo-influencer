@@ -238,14 +238,17 @@ router.post(
       }
     }
 
-    // Fetch existing worklogs for the period (best-effort — ignore errors)
+    // Fetch existing worklogs for the period, scoped to the distributed issues only.
+    // Using projectId here is wrong — project.project_id is a Tempo financial UUID, not a
+    // numeric Jira project ID, so Tempo ignores it and returns ALL worklogs for all users,
+    // filling the capacity map with unrelated project work.
     let existingWorklogs: Awaited<ReturnType<typeof tempoClient.getWorklogs>> = [];
     try {
-      existingWorklogs = await tempoClient.getWorklogs({
-        projectId: project.project_id,
-        from,
-        to,
-      });
+      const assignedIssueIds = new Set(issueConfigs.map(ic => Number(ic.issueId)));
+      const allWorklogs = await tempoClient.getWorklogs({ from, to });
+      existingWorklogs = allWorklogs.filter(
+        wl => wl.issue?.id != null && assignedIssueIds.has(wl.issue.id)
+      );
     } catch {
       // Fall back to empty — distributor will assume full daily capacity
     }

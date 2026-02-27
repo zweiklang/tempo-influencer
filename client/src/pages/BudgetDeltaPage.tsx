@@ -1183,7 +1183,10 @@ function Step4({
       <div className="flex items-start justify-between">
         <div>
           <h3 className="text-lg font-semibold">Step 4: Preview Distribution</h3>
-          <p className="text-muted-foreground text-sm mt-1">Review the worklog schedule before submitting</p>
+          <p className="text-muted-foreground text-sm mt-1">
+            Review the worklog schedule before submitting
+            <span className="ml-2 font-medium text-foreground">{from} → {to}</span>
+          </p>
         </div>
         <Button variant="outline" size="sm" onClick={handleReroll} disabled={isDistributing}>
           {isDistributing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
