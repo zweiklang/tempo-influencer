@@ -16,6 +16,9 @@ tempo-api-research.md
 # OS
 .DS_Store
 
+# Playwright MCP logs
+.playwright-mcp/
+
 # Build artifacts
 client/dist/
 server/dist/
