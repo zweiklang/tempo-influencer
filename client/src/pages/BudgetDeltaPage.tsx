@@ -22,6 +22,7 @@ import { formatCurrency, formatHours, formatDate } from '@/lib/utils';
 import {
   ChevronRight, ChevronLeft, ChevronDown, ChevronUp,
   Loader2, RefreshCw, CheckCircle, XCircle, Wand2,
+  Trash2, Plus,
 } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -35,6 +36,11 @@ interface RoleConfig {
   billingRate: number;
   memberCount: number;
   accountIds: string[];
+}
+
+interface RoleHourLimit {
+  roleId: number;
+  maxHours: number;
 }
 
 interface HourBreakdown {
@@ -548,12 +554,16 @@ function Step3({
   selectedRoles,
   issueConfigs,
   onIssueConfigsChange,
+  roleHourLimits,
+  onRoleHourLimitsChange,
   onNext,
   onBack,
 }: {
   selectedRoles: RoleConfig[];
   issueConfigs: IssueConfig[];
   onIssueConfigsChange: (c: IssueConfig[]) => void;
+  roleHourLimits: RoleHourLimit[];
+  onRoleHourLimitsChange: (l: RoleHourLimit[]) => void;
   onNext: () => void;
   onBack: () => void;
 }) {
@@ -569,6 +579,14 @@ function Step3({
   const [autoAssignScope, setAutoAssignScope] = useState<'all' | 'active'>('all');
   const [autoAssignExcludeEpics, setAutoAssignExcludeEpics] = useState(false);
   const [autoAssigning, setAutoAssigning] = useState(false);
+
+  // Role hour limits accordion state
+  const [limitsOpen, setLimitsOpen] = useState(false);
+  const [newLimitRoleId, setNewLimitRoleId] = useState<number | null>(null);
+  const [newLimitSearch, setNewLimitSearch] = useState('');
+  const [newLimitHours, setNewLimitHours] = useState('');
+  const [limitDropdownOpen, setLimitDropdownOpen] = useState(false);
+
   const { data: geminiSettingsData } = useGeminiSettings();
   const geminiConfigured = !!(geminiSettingsData as { configured?: boolean } | undefined)?.configured;
 
@@ -716,6 +734,123 @@ function Step3({
           </Button>
         )}
       </div>
+
+      {/* Role Hour Limits accordion */}
+      {selectedRoles.length > 0 && (
+        <div className="border rounded-lg">
+          <button
+            type="button"
+            onClick={() => setLimitsOpen(o => !o)}
+            className="w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium hover:bg-accent/50 transition-colors rounded-lg"
+          >
+            <span className="flex items-center gap-2">
+              Role Hour Limits
+              {roleHourLimits.length > 0 && (
+                <Badge variant="secondary" className="text-xs">{roleHourLimits.length}</Badge>
+              )}
+            </span>
+            {limitsOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+          </button>
+
+          {limitsOpen && (
+            <div className="px-4 pb-4 space-y-2 border-t pt-3">
+              {/* Existing limits */}
+              {roleHourLimits.map(limit => {
+                const role = selectedRoles.find(r => r.roleId === limit.roleId);
+                return (
+                  <div key={limit.roleId} className="flex items-center gap-2">
+                    <span className="flex-1 text-sm">{role?.roleName ?? `Role ${limit.roleId}`}</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      value={limit.maxHours}
+                      onChange={e => {
+                        const val = Number(e.target.value);
+                        if (val > 0) {
+                          onRoleHourLimitsChange(roleHourLimits.map(l => l.roleId === limit.roleId ? { ...l, maxHours: val } : l));
+                        }
+                      }}
+                      className="w-20 h-8 text-sm"
+                    />
+                    <span className="text-sm text-muted-foreground">h</span>
+                    <button
+                      type="button"
+                      onClick={() => onRoleHourLimitsChange(roleHourLimits.filter(l => l.roleId !== limit.roleId))}
+                      className="text-muted-foreground hover:text-destructive transition-colors"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              })}
+
+              {/* Add new limit row */}
+              {(() => {
+                const availableRoles = selectedRoles.filter(r => !roleHourLimits.some(l => l.roleId === r.roleId));
+                if (availableRoles.length === 0) return null;
+                const filteredRoles = availableRoles.filter(r =>
+                  r.roleName.toLowerCase().includes(newLimitSearch.toLowerCase())
+                );
+                return (
+                  <div className="flex items-center gap-2 pt-1">
+                    <div className="relative flex-1">
+                      <Input
+                        placeholder="Search role…"
+                        value={newLimitRoleId ? (selectedRoles.find(r => r.roleId === newLimitRoleId)?.roleName ?? '') : newLimitSearch}
+                        onChange={e => { setNewLimitSearch(e.target.value); setNewLimitRoleId(null); setLimitDropdownOpen(true); }}
+                        onFocus={() => setLimitDropdownOpen(true)}
+                        className="h-8 text-sm"
+                      />
+                      {limitDropdownOpen && filteredRoles.length > 0 && !newLimitRoleId && (
+                        <div className="absolute top-full left-0 right-0 z-20 mt-1 rounded-md border bg-popover shadow-md max-h-40 overflow-y-auto">
+                          {filteredRoles.map(r => (
+                            <button
+                              key={r.roleId}
+                              type="button"
+                              className="w-full text-left px-3 py-1.5 text-sm hover:bg-accent"
+                              onMouseDown={e => {
+                                e.preventDefault();
+                                setNewLimitRoleId(r.roleId);
+                                setNewLimitSearch('');
+                                setLimitDropdownOpen(false);
+                              }}
+                            >
+                              {r.roleName}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <Input
+                      type="number"
+                      min={1}
+                      placeholder="Max h"
+                      value={newLimitHours}
+                      onChange={e => setNewLimitHours(e.target.value)}
+                      className="w-20 h-8 text-sm"
+                    />
+                    <span className="text-sm text-muted-foreground">h</span>
+                    <button
+                      type="button"
+                      disabled={!newLimitRoleId || !newLimitHours || Number(newLimitHours) <= 0}
+                      onClick={() => {
+                        if (!newLimitRoleId || !newLimitHours || Number(newLimitHours) <= 0) return;
+                        onRoleHourLimitsChange([...roleHourLimits, { roleId: newLimitRoleId, maxHours: Number(newLimitHours) }]);
+                        setNewLimitRoleId(null);
+                        setNewLimitSearch('');
+                        setNewLimitHours('');
+                      }}
+                      className="text-muted-foreground hover:text-primary disabled:opacity-40 transition-colors"
+                    >
+                      <Plus className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Auto-Assign Dialog */}
       <Dialog open={autoAssignOpen} onOpenChange={setAutoAssignOpen}>
@@ -928,6 +1063,7 @@ function Step4({
   onScheduleChange,
   currentRevenue,
   targetRevenue,
+  roleHourLimits,
   onNext,
   onBack,
 }: {
@@ -941,6 +1077,7 @@ function Step4({
   onScheduleChange: (s: ScheduledEntry[]) => void;
   currentRevenue: number;
   targetRevenue: number;
+  roleHourLimits: RoleHourLimit[];
   onNext: () => void;
   onBack: () => void;
 }) {
@@ -970,6 +1107,7 @@ function Step4({
         from,
         to,
         seed: currentSeed,
+        roleHourLimits,
       });
       onScheduleChange(result.schedule || []);
     } catch (err: unknown) {
@@ -978,7 +1116,7 @@ function Step4({
     } finally {
       setIsDistributing(false);
     }
-  }, [issueConfigs, selectedRoles, hourBreakdown, memberNames, from, to, onScheduleChange]);
+  }, [issueConfigs, selectedRoles, hourBreakdown, memberNames, from, to, roleHourLimits, onScheduleChange]);
 
   useEffect(() => {
     distribute(seed);
@@ -1458,6 +1596,7 @@ export function BudgetDeltaPage() {
 
   // Step 3
   const [issueConfigs, setIssueConfigs] = useState<IssueConfig[]>([]);
+  const [roleHourLimits, setRoleHourLimits] = useState<RoleHourLimit[]>([]);
 
   // Step 4
   const [schedule, setSchedule] = useState<ScheduledEntry[]>([]);
@@ -1517,6 +1656,8 @@ export function BudgetDeltaPage() {
               selectedRoles={selectedRoles}
               issueConfigs={issueConfigs}
               onIssueConfigsChange={setIssueConfigs}
+              roleHourLimits={roleHourLimits}
+              onRoleHourLimitsChange={setRoleHourLimits}
               onNext={() => setStep(4)}
               onBack={() => setStep(2)}
             />
@@ -1534,6 +1675,7 @@ export function BudgetDeltaPage() {
               onScheduleChange={setSchedule}
               currentRevenue={currentRevenue}
               targetRevenue={targetRevenue}
+              roleHourLimits={roleHourLimits}
               onNext={() => setStep(5)}
               onBack={() => setStep(3)}
             />

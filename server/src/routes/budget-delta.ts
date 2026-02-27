@@ -101,6 +101,10 @@ const DistributeBody = z.object({
   seed: z.number().optional(),
   targetRevenue: z.number().optional(),
   currentRevenue: z.number().optional(),
+  roleHourLimits: z.array(z.object({
+    roleId: z.number(),
+    maxHours: z.number().positive(),
+  })).optional(),
 });
 
 router.post(
@@ -124,7 +128,7 @@ router.post(
       return;
     }
 
-    const { issueConfigs, roleConfigs, hourBreakdown: passedBreakdown, memberNames, from, to, seed, targetRevenue, currentRevenue } = parsed.data;
+    const { issueConfigs, roleConfigs, hourBreakdown: passedBreakdown, memberNames, from, to, seed, targetRevenue, currentRevenue, roleHourLimits } = parsed.data;
 
     // Determine which roles actually have issues assigned
     const assignedRoleIds = new Set(issueConfigs.flatMap(ic => ic.roleIds));
@@ -151,6 +155,21 @@ router.post(
       }));
     } else {
       effectiveBreakdown = passedBreakdown.filter(h => assignedRoleIds.has(h.roleId));
+    }
+
+    // Apply per-role hour caps if set
+    if (roleHourLimits && roleHourLimits.length > 0) {
+      effectiveBreakdown = effectiveBreakdown.map(h => {
+        const limit = roleHourLimits.find(l => l.roleId === h.roleId);
+        if (!limit) return h;
+        const cappedTotal = Math.min(h.totalHours, limit.maxHours);
+        const memberCount = roleConfigs.find(r => r.roleId === h.roleId)?.accountIds.length || 1;
+        return {
+          ...h,
+          totalHours: cappedTotal,
+          hoursPerMember: snapToHalf(cappedTotal / memberCount),
+        };
+      });
     }
 
     // Build flat assignments + track roleId per (accountId, issueId)
