@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { getSetting, getSelectedProject, upsertTeamMemberCache, getAllBillingRateOverrides, setBillingRateOverride } from '../db';
+import { getSetting, getSelectedProject, upsertTeamMemberCache, getAllBillingRateOverrides, setBillingRateOverride, getRoleDescription, setRoleDescriptions } from '../db';
 import { decrypt } from '../services/crypto';
 import { createTempoClient } from '../services/tempoClient';
 import { createJiraClient } from '../services/jiraClient';
@@ -107,7 +107,31 @@ router.get(
     }
 
     const roles = await tempoClient.getRoles();
-    res.json(roles);
+    const enriched = roles.map((r) => ({ ...r, description: getRoleDescription(r.id) }));
+    res.json(enriched);
+  })
+);
+
+// PUT /roles/descriptions
+const RoleDescriptionsBody = z.object({
+  descriptions: z.record(z.string(), z.string()),
+});
+
+router.put(
+  '/roles/descriptions',
+  tryCatch(async (req, res) => {
+    const parsed = RoleDescriptionsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid body', details: parsed.error.flatten() });
+      return;
+    }
+
+    const descriptions: Record<number, string> = {};
+    for (const [key, value] of Object.entries(parsed.data.descriptions)) {
+      descriptions[Number(key)] = value;
+    }
+    setRoleDescriptions(descriptions);
+    res.json({ success: true });
   })
 );
 

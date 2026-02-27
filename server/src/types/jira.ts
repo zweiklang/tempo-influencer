@@ -29,10 +29,17 @@ export interface JiraAssignee {
   emailAddress?: string;
 }
 
+export interface JiraIssueType {
+  name: string;
+}
+
 export interface JiraIssueFields {
   summary: string;
   status: JiraStatus;
   assignee?: JiraAssignee | null;
+  issuetype?: JiraIssueType;
+  labels?: string[];
+  parent?: { fields?: { summary?: string } };
 }
 
 export interface JiraIssue {

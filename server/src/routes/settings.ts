@@ -4,6 +4,7 @@ import { getSetting, setSetting, getSelectedProject, setSelectedProject } from '
 import { encrypt, decrypt } from '../services/crypto';
 import { createJiraClient } from '../services/jiraClient';
 import { createTempoClient } from '../services/tempoClient';
+import { getAvailableModels } from '../services/geminiClient';
 import type { RequestHandler } from 'express';
 
 const router = Router();
@@ -139,6 +140,62 @@ router.get(
     const tempoClient = createTempoClient(decrypt(tempoTokenEnc));
     const projects = await tempoClient.getFinancialProjects();
     res.json(projects.map((p) => ({ id: p.id, name: p.name, status: p.status })));
+  })
+);
+
+// GET /gemini — Gemini config status
+router.get(
+  '/gemini',
+  tryCatch(async (_req, res) => {
+    const geminiTokenEnc = getSetting('gemini_token');
+    const geminiTokenSavedAt = getSetting('gemini_token_saved_at');
+    const geminiModel = getSetting('gemini_model');
+    res.json({
+      configured: !!geminiTokenEnc,
+      geminiTokenSavedAt: geminiTokenSavedAt ?? undefined,
+      model: geminiModel ?? null,
+    });
+  })
+);
+
+const GeminiBody = z.object({
+  apiKey: z.string().optional(),
+  model: z.string().optional(),
+});
+
+// PUT /gemini — save Gemini settings
+router.put(
+  '/gemini',
+  tryCatch(async (req, res) => {
+    const parsed = GeminiBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid body', details: parsed.error.flatten() });
+      return;
+    }
+    const { apiKey, model } = parsed.data;
+    if (apiKey && apiKey.trim()) {
+      setSetting('gemini_token', encrypt(apiKey.trim()));
+      setSetting('gemini_token_saved_at', new Date().toISOString());
+    }
+    if (model !== undefined) {
+      setSetting('gemini_model', model);
+    }
+    res.json({ success: true });
+  })
+);
+
+// GET /gemini/models — fetch available models from Gemini API
+router.get(
+  '/gemini/models',
+  tryCatch(async (_req, res) => {
+    const geminiTokenEnc = getSetting('gemini_token');
+    if (!geminiTokenEnc) {
+      res.status(401).json({ error: 'Gemini API key not configured' });
+      return;
+    }
+    const models = await getAvailableModels(decrypt(geminiTokenEnc));
+    models.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    res.json(models);
   })
 );
 

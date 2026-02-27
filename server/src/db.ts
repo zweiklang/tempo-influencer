@@ -153,6 +153,27 @@ export function getCachedTeamId(): number | null {
   return row?.team_id ? Number(row.team_id) : null;
 }
 
+// ---- Role Descriptions ----
+
+export function getRoleDescription(roleId: number): string {
+  const row = db
+    .prepare('SELECT description FROM role_descriptions WHERE role_id = ?')
+    .get(roleId) as { description: string } | undefined;
+  return row?.description ?? '';
+}
+
+export function setRoleDescriptions(descriptions: Record<number, string>): void {
+  const upsert = db.prepare(
+    'INSERT OR REPLACE INTO role_descriptions (role_id, description) VALUES (?, ?)'
+  );
+  const transaction = db.transaction((entries: [number, string][]) => {
+    for (const [roleId, description] of entries) {
+      upsert.run(roleId, description);
+    }
+  });
+  transaction(Object.entries(descriptions).map(([k, v]) => [Number(k), v]));
+}
+
 // ---- Worklog Audit ----
 
 export function insertWorklogAudit(entry: WorklogAuditInsert): void {
