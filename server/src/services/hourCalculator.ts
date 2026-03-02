@@ -1,31 +1,29 @@
-export interface RoleInput {
-  roleId: string | number;
+interface RoleInput {
+  roleId: number;
   roleName: string;
   billingRate: number;
   memberCount: number;
 }
 
-export interface RoleOutput extends RoleInput {
+interface RoleOutput extends RoleInput {
   hoursPerMember: number;
   totalHours: number;
   revenueContribution: number;
 }
 
-export interface HourCalculatorInput {
+interface HourCalculatorInput {
   targetRevenue: number;
   currentRevenue: number;
   roles: RoleInput[];
 }
 
-export interface HourCalculatorOutput {
+interface HourCalculatorOutput {
   roles: RoleOutput[];
   totalDeltaRevenue: number;
   achievedRevenue: number;
 }
 
-function snapToHalf(value: number): number {
-  return Math.round(value / 0.5) * 0.5;
-}
+import { snapToHalf } from '../lib/math';
 
 export function calculateHours(input: HourCalculatorInput): HourCalculatorOutput {
   const { targetRevenue, currentRevenue, roles } = input;

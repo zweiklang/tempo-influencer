@@ -60,7 +60,7 @@ export function Combobox({
           className="z-50 w-[var(--radix-popover-trigger-width)] rounded-md border bg-popover p-0 text-popover-foreground shadow-md outline-none"
           sideOffset={4}
         >
-          <Command>
+          <Command shouldFilter={false}>
             <div className="flex items-center border-b px-3">
               <input
                 className="flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"

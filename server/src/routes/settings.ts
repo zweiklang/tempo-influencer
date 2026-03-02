@@ -2,19 +2,12 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { getSetting, setSetting, getSelectedProject, setSelectedProject } from '../db';
 import { encrypt, decrypt } from '../services/crypto';
-import { createJiraClient } from '../services/jiraClient';
 import { createTempoClient } from '../services/tempoClient';
+import { createJiraClient } from '../services/jiraClient';
 import { getAvailableModels } from '../services/geminiClient';
-import type { RequestHandler } from 'express';
+import { tryCatch, getTempoClient } from './helpers';
 
 const router = Router();
-
-// Helper to wrap async handlers
-function tryCatch(fn: (req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1]) => Promise<void>): RequestHandler {
-  return (req, res, next) => {
-    fn(req, res).catch(next);
-  };
-}
 
 // GET /credentials — return credential status + safe pre-fill values
 router.get(
@@ -24,7 +17,8 @@ router.get(
     const jiraEmailEnc = getSetting('jira_email');
     const jiraToken = getSetting('jira_token');
     const tempoToken = getSetting('tempo_token');
-    const tokenSavedAt = getSetting('token_saved_at');
+    const jiraTokenSavedAt = getSetting('jira_token_saved_at') ?? getSetting('token_saved_at');
+    const tempoTokenSavedAt = getSetting('tempo_token_saved_at') ?? getSetting('token_saved_at');
 
     const configured = !!(jiraUrlEnc && jiraEmailEnc && jiraToken && tempoToken);
 
@@ -32,8 +26,8 @@ router.get(
       configured,
       jiraUrl: jiraUrlEnc ? decrypt(jiraUrlEnc) : undefined,
       jiraEmail: jiraEmailEnc ? decrypt(jiraEmailEnc) : undefined,
-      jiraTokenSavedAt: tokenSavedAt ?? undefined,
-      tempoTokenSavedAt: tokenSavedAt ?? undefined,
+      jiraTokenSavedAt: jiraTokenSavedAt ?? undefined,
+      tempoTokenSavedAt: tempoTokenSavedAt ?? undefined,
     });
   })
 );
@@ -75,11 +69,14 @@ router.put(
     }
 
     // Encrypt and store
+    const now = new Date().toISOString();
     setSetting('jira_url', encrypt(jiraUrl));
     setSetting('jira_email', encrypt(jiraEmail));
     setSetting('jira_token', encrypt(jiraToken));
+    setSetting('jira_token_saved_at', now);
     setSetting('tempo_token', encrypt(tempoToken));
-    setSetting('token_saved_at', new Date().toISOString());
+    setSetting('tempo_token_saved_at', now);
+    setSetting('token_saved_at', now); // legacy key — kept for backwards compatibility
 
     res.json({ success: true });
   })
@@ -131,13 +128,12 @@ router.put(
 router.get(
   '/projects',
   tryCatch(async (_req, res) => {
-    const tempoTokenEnc = getSetting('tempo_token');
-    if (!tempoTokenEnc) {
+    const tempoClient = getTempoClient();
+    if (!tempoClient) {
       res.status(401).json({ error: 'Tempo credentials not configured' });
       return;
     }
 
-    const tempoClient = createTempoClient(decrypt(tempoTokenEnc));
     const projects = await tempoClient.getFinancialProjects();
     res.json(projects.map((p) => ({ id: p.id, name: p.name, status: p.status })));
   })

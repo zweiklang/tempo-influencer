@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { eachDayOfInterval, parseISO, getDay, format } from 'date-fns';
+import { parseISO, format } from 'date-fns';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,6 +13,7 @@ import {
 import { Combobox } from '@/components/ui/combobox';
 import { useRevenue } from '@/hooks/useWorklogs';
 import { useBillingRates, useTeams, useTeamMembers } from '@/hooks/useTeam';
+import type { BillingRatesResponse } from '@/types/billingRates';
 import { useOpenIssues } from '@/hooks/useIssues';
 import { useGeminiSettings } from '@/hooks/useSettings';
 import { useAppStore } from '@/store/appStore';
@@ -86,9 +87,6 @@ interface SubmitResult {
   error?: string;
 }
 
-interface BillingRatesData {
-  rates?: Array<{ roleId?: number; accountId?: string; rate: number; source: string }>;
-}
 
 interface TeamMember {
   accountId: string;
@@ -251,14 +249,14 @@ function Step2({
 }) {
   const { selectedProject } = useAppStore();
   const { data: teamsData } = useTeams();
-  const { data: billingRatesData } = useBillingRates(selectedProject?.projectId);
+  const { data: billingRatesData } = useBillingRates();
 
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
   const { data: membersData } = useTeamMembers(selectedTeamId);
 
   const teams = (teamsData as Array<{ id: number; name: string }>) || [];
   const members = (membersData as TeamMember[]) || [];
-  const billingRates = billingRatesData as BillingRatesData | undefined;
+  const billingRates = billingRatesData;
 
   const [isCalculating, setIsCalculating] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -281,12 +279,12 @@ function Step2({
       const names = Object.fromEntries(members.map(m => [m.accountId, m.displayName]));
       onMemberNamesChange(names);
     }
-  }, [members]);
+  }, [members, onMemberNamesChange]);
 
   // Reset selected roles when switching teams
   useEffect(() => {
     onRolesChange([]);
-  }, [selectedTeamId]);
+  }, [selectedTeamId, onRolesChange]);
 
   // Auto-prefill roles, members, and billing rates when team members load
   useEffect(() => {
@@ -305,8 +303,8 @@ function Step2({
       roleMap.get(m.roleId)!.accountIds.push(m.accountId);
     }
 
-    const overrides = (billingRatesData as { overrides?: Array<{ account_id: string; billing_rate: number }> }).overrides ?? [];
-    const projectDefaultRate = (billingRatesData as { projectDefaultRate?: number }).projectDefaultRate ?? 0;
+    const overrides = billingRatesData?.overrides ?? [];
+    const projectDefaultRate = billingRatesData?.projectDefaultRate ?? 0;
 
     const preFilledRoles: RoleConfig[] = Array.from(roleMap.entries()).map(([roleId, { roleName, accountIds }]) => {
       let billingRate = projectDefaultRate;
@@ -330,12 +328,16 @@ function Step2({
       roles: preFilledRoles,
     }).then(result => {
       onBreakdownChange(result.breakdown || []);
-    }).catch(() => {});
+    }).catch((err: unknown) => {
+      console.warn('Pre-fill calculate failed:', err);
+    });
   }, [members, billingRatesData, selectedTeamId, onRolesChange, onBreakdownChange, targetRevenue, currentRevenue, from, to]);
 
   const getRateForRole = useCallback((roleId: number): number => {
-    const rateEntry = billingRates?.rates?.find((r) => r.roleId === roleId);
-    return rateEntry?.rate ?? 0;
+    const globalRate = billingRates?.globalRates?.find(
+      (r) => r.account?.type === 'ROLE' && String(r.account.id) === String(roleId)
+    );
+    return globalRate?.rate ?? 0;
   }, [billingRates]);
 
   const toggleRole = (role: { id: number; name: string }) => {
@@ -388,8 +390,8 @@ function Step2({
           roles: selectedRoles,
         });
         onBreakdownChange(result.breakdown || []);
-      } catch {
-        // ignore calculation errors silently
+      } catch (err: unknown) {
+        console.error('Hour calculation failed:', err);
       } finally {
         setIsCalculating(false);
       }
@@ -659,7 +661,7 @@ function Step3({
         }))
       );
     }
-  }, [issues]);
+  }, [issues, issueConfigs, onIssueConfigsChange]);
 
   const getFilteredRoles = (issueId: number) => {
     const search = (roleSearch[issueId] ?? '').toLowerCase();
@@ -701,6 +703,69 @@ function Step3({
   };
 
   const hasAnyAssignment = issueConfigs.some(ic => ic.roleIds.length > 0);
+
+  function renderAddLimitRow() {
+    const availableRoles = selectedRoles.filter(r => !roleHourLimits.some(l => l.roleId === r.roleId));
+    if (availableRoles.length === 0) return null;
+    const filteredRoles = availableRoles.filter(r =>
+      r.roleName.toLowerCase().includes(newLimitSearch.toLowerCase())
+    );
+    return (
+      <div className="flex items-center gap-2 pt-1">
+        <div className="relative flex-1">
+          <Input
+            placeholder="Search role…"
+            value={newLimitRoleId ? (selectedRoles.find(r => r.roleId === newLimitRoleId)?.roleName ?? '') : newLimitSearch}
+            onChange={e => { setNewLimitSearch(e.target.value); setNewLimitRoleId(null); setLimitDropdownOpen(true); }}
+            onFocus={() => setLimitDropdownOpen(true)}
+            className="h-8 text-sm"
+          />
+          {limitDropdownOpen && filteredRoles.length > 0 && !newLimitRoleId && (
+            <div className="absolute top-full left-0 right-0 z-20 mt-1 rounded-md border bg-popover shadow-md max-h-40 overflow-y-auto">
+              {filteredRoles.map(r => (
+                <button
+                  key={r.roleId}
+                  type="button"
+                  className="w-full text-left px-3 py-1.5 text-sm hover:bg-accent"
+                  onMouseDown={e => {
+                    e.preventDefault();
+                    setNewLimitRoleId(r.roleId);
+                    setNewLimitSearch('');
+                    setLimitDropdownOpen(false);
+                  }}
+                >
+                  {r.roleName}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <Input
+          type="number"
+          min={1}
+          placeholder="Max h"
+          value={newLimitHours}
+          onChange={e => setNewLimitHours(e.target.value)}
+          className="w-20 h-8 text-sm"
+        />
+        <span className="text-sm text-muted-foreground">h</span>
+        <button
+          type="button"
+          disabled={!newLimitRoleId || !newLimitHours || Number(newLimitHours) <= 0}
+          onClick={() => {
+            if (!newLimitRoleId || !newLimitHours || Number(newLimitHours) <= 0) return;
+            onRoleHourLimitsChange([...roleHourLimits, { roleId: newLimitRoleId, maxHours: Number(newLimitHours) }]);
+            setNewLimitRoleId(null);
+            setNewLimitSearch('');
+            setNewLimitHours('');
+          }}
+          className="text-muted-foreground hover:text-primary disabled:opacity-40 transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+      </div>
+    );
+  }
 
   if (issuesLoading) {
     return (
@@ -785,68 +850,7 @@ function Step3({
               })}
 
               {/* Add new limit row */}
-              {(() => {
-                const availableRoles = selectedRoles.filter(r => !roleHourLimits.some(l => l.roleId === r.roleId));
-                if (availableRoles.length === 0) return null;
-                const filteredRoles = availableRoles.filter(r =>
-                  r.roleName.toLowerCase().includes(newLimitSearch.toLowerCase())
-                );
-                return (
-                  <div className="flex items-center gap-2 pt-1">
-                    <div className="relative flex-1">
-                      <Input
-                        placeholder="Search role…"
-                        value={newLimitRoleId ? (selectedRoles.find(r => r.roleId === newLimitRoleId)?.roleName ?? '') : newLimitSearch}
-                        onChange={e => { setNewLimitSearch(e.target.value); setNewLimitRoleId(null); setLimitDropdownOpen(true); }}
-                        onFocus={() => setLimitDropdownOpen(true)}
-                        className="h-8 text-sm"
-                      />
-                      {limitDropdownOpen && filteredRoles.length > 0 && !newLimitRoleId && (
-                        <div className="absolute top-full left-0 right-0 z-20 mt-1 rounded-md border bg-popover shadow-md max-h-40 overflow-y-auto">
-                          {filteredRoles.map(r => (
-                            <button
-                              key={r.roleId}
-                              type="button"
-                              className="w-full text-left px-3 py-1.5 text-sm hover:bg-accent"
-                              onMouseDown={e => {
-                                e.preventDefault();
-                                setNewLimitRoleId(r.roleId);
-                                setNewLimitSearch('');
-                                setLimitDropdownOpen(false);
-                              }}
-                            >
-                              {r.roleName}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <Input
-                      type="number"
-                      min={1}
-                      placeholder="Max h"
-                      value={newLimitHours}
-                      onChange={e => setNewLimitHours(e.target.value)}
-                      className="w-20 h-8 text-sm"
-                    />
-                    <span className="text-sm text-muted-foreground">h</span>
-                    <button
-                      type="button"
-                      disabled={!newLimitRoleId || !newLimitHours || Number(newLimitHours) <= 0}
-                      onClick={() => {
-                        if (!newLimitRoleId || !newLimitHours || Number(newLimitHours) <= 0) return;
-                        onRoleHourLimitsChange([...roleHourLimits, { roleId: newLimitRoleId, maxHours: Number(newLimitHours) }]);
-                        setNewLimitRoleId(null);
-                        setNewLimitSearch('');
-                        setNewLimitHours('');
-                      }}
-                      className="text-muted-foreground hover:text-primary disabled:opacity-40 transition-colors"
-                    >
-                      <Plus className="h-4 w-4" />
-                    </button>
-                  </div>
-                );
-              })()}
+              {renderAddLimitRow()}
             </div>
           )}
         </div>
@@ -1082,13 +1086,15 @@ function Step4({
   onBack: () => void;
 }) {
   const [isDistributing, setIsDistributing] = useState(false);
+  const [distributionError, setDistributionError] = useState<string | null>(null);
   const [seed, setSeed] = useState(Date.now());
   const [expandedIssueId, setExpandedIssueId] = useState<number | null>(null);
+  const initializedRef = useRef(false);
 
-  const getBillingRate = (roleId: number): number => {
+  const getBillingRate = useCallback((roleId: number): number => {
     const role = selectedRoles.find(r => r.roleId === roleId);
     return role?.billingRate ?? 0;
-  };
+  }, [selectedRoles]);
 
   const distribute = useCallback(async (currentSeed: number) => {
     setIsDistributing(true);
@@ -1112,33 +1118,33 @@ function Step4({
       onScheduleChange(result.schedule || []);
     } catch (err: unknown) {
       const error = err as Error;
-      console.error('Distribution failed:', error.message);
+      setDistributionError(error.message);
     } finally {
       setIsDistributing(false);
     }
   }, [issueConfigs, selectedRoles, hourBreakdown, memberNames, from, to, roleHourLimits, onScheduleChange]);
 
+  // Run distribute once on mount only. The ref guard prevents re-runs when
+  // distribute or seed appear in deps (required for exhaustive-deps); explicit
+  // re-distribution is triggered by handleReroll which calls distribute directly.
   useEffect(() => {
+    if (initializedRef.current) return;
+    initializedRef.current = true;
     distribute(seed);
-  }, []);
+  }, [distribute, seed]);
 
   const handleReroll = () => {
     const newSeed = Date.now();
+    setDistributionError(null);
     setSeed(newSeed);
     distribute(newSeed);
   };
 
-  // Working days for calendar
+  // Working days for calendar — derived from schedule dates to match the distributor exactly
   const workingDays = useMemo(() => {
-    if (!from || !to) return [];
-    try {
-      return eachDayOfInterval({ start: parseISO(from), end: parseISO(to) })
-        .filter(d => getDay(d) !== 0 && getDay(d) !== 6)
-        .map(d => format(d, 'yyyy-MM-dd'));
-    } catch {
-      return [];
-    }
-  }, [from, to]);
+    const days = [...new Set(schedule.map(e => e.startDate))].sort();
+    return days;
+  }, [schedule]);
 
   // Revenue stats
   const deltaToAchieve = targetRevenue - currentRevenue;
@@ -1150,14 +1156,18 @@ function Step4({
   // Issues with roles assigned
   const activeIssues = issueConfigs.filter(ic => ic.roleIds.length > 0);
 
-  const getIssueHours = (issueId: number) =>
-    schedule.filter(e => e.issueId === issueId).reduce((s, e) => s + e.hours, 0);
+  const issueStats = useMemo(() => {
+    const m = new Map<number, { hours: number; revenue: number }>();
+    for (const e of schedule) {
+      const id = e.issueId as number;
+      const prev = m.get(id) ?? { hours: 0, revenue: 0 };
+      m.set(id, { hours: prev.hours + e.hours, revenue: prev.revenue + e.hours * getBillingRate(e.roleId ?? 0) });
+    }
+    return m;
+  }, [schedule, getBillingRate]);
 
-  const getIssueRevenue = (issueId: number) =>
-    schedule.filter(e => e.issueId === issueId).reduce(
-      (s, e) => s + e.hours * getBillingRate(e.roleId ?? 0),
-      0
-    );
+  const getIssueHours = (issueId: number) => issueStats.get(issueId)?.hours ?? 0;
+  const getIssueRevenue = (issueId: number) => issueStats.get(issueId)?.revenue ?? 0;
 
   const getAssignedMembers = (ic: IssueConfig) =>
     ic.roleIds.flatMap(roleId => {
@@ -1170,13 +1180,16 @@ function Step4({
     });
 
   // Footer role totals (only roles that contributed hours)
-  const roleTotals = selectedRoles
-    .map(role => {
-      const entries = schedule.filter(e => e.roleId === role.roleId);
-      const hours = entries.reduce((s, e) => s + e.hours, 0);
-      return { ...role, hours, revenue: hours * role.billingRate };
-    })
-    .filter(r => r.hours > 0);
+  const roleTotals = useMemo(() =>
+    selectedRoles
+      .map(role => {
+        const entries = schedule.filter(e => e.roleId === role.roleId);
+        const hours = entries.reduce((s, e) => s + e.hours, 0);
+        return { ...role, hours, revenue: hours * role.billingRate };
+      })
+      .filter(r => r.hours > 0),
+    [schedule, selectedRoles]
+  );
 
   return (
     <div className="space-y-6">
@@ -1193,6 +1206,12 @@ function Step4({
           <span className="ml-2">Reroll</span>
         </Button>
       </div>
+
+      {distributionError && (
+        <div className="rounded-md bg-destructive/10 border border-destructive/30 px-4 py-3 text-sm text-destructive">
+          Distribution failed: {distributionError}
+        </div>
+      )}
 
       {/* Revenue summary — 4 stat cards */}
       <div className="grid grid-cols-2 gap-4">
@@ -1429,6 +1448,8 @@ function Step5({
     setIsSubmitting(true);
     setResults([]);
     setSubmitted(0);
+    let localSuccess = 0;
+    let localError = 0;
 
     for (let i = 0; i < schedule.length; i++) {
       const entry = schedule[i];
@@ -1439,6 +1460,7 @@ function Step5({
           startDate: entry.startDate,
           hours: entry.hours,
         });
+        localSuccess++;
         setResults((prev) => [
           ...prev,
           {
@@ -1452,6 +1474,7 @@ function Step5({
           },
         ]);
       } catch (err: unknown) {
+        localError++;
         const error = err as Error;
         setResults((prev) => [
           ...prev,
@@ -1473,7 +1496,7 @@ function Step5({
     setIsSubmitting(false);
     toast({
       title: 'Submission complete',
-      description: `${successCount} created, ${errorCount} errors`,
+      description: `${localSuccess} created, ${localError} errors`,
     });
   };
 

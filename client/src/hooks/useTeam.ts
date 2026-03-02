@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/api/apiClient';
+import type { BillingRatesResponse } from '@/types/billingRates';
 
 export function useTeams() {
   return useQuery({ queryKey: ['teams'], queryFn: () => api.get('/api/team/teams'), staleTime: 10 * 60 * 1000 });
@@ -18,9 +19,9 @@ export function useRoles() {
   return useQuery({ queryKey: ['roles'], queryFn: () => api.get('/api/team/roles'), staleTime: 10 * 60 * 1000 });
 }
 
-export function useBillingRates(projectId: string | undefined) {
-  return useQuery({
-    queryKey: ['billing-rates', projectId],
+export function useBillingRates() {
+  return useQuery<BillingRatesResponse>({
+    queryKey: ['billing-rates'],
     queryFn: () => api.get('/api/team/billing-rates'),
     staleTime: 5 * 60 * 1000,
   });
@@ -29,13 +30,13 @@ export function useBillingRates(projectId: string | undefined) {
 export function useSaveBillingRateOverride() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { accountId: string; projectId: string; rate: number }) =>
+    mutationFn: (data: { accountId: string; rate: number }) =>
       api.put('/api/team/billing-rates/override', {
         accountId: data.accountId,
         billingRate: data.rate,
       }),
-    onSuccess: (_: unknown, vars: { accountId: string; projectId: string; rate: number }) => {
-      qc.invalidateQueries({ queryKey: ['billing-rates', vars.projectId] });
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['billing-rates'] });
     },
   });
 }

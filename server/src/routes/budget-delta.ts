@@ -1,52 +1,30 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import axios from 'axios';
-import { getSetting, getSelectedProject, insertWorklogAudit } from '../db';
-import { decrypt } from '../services/crypto';
-import { createTempoClient } from '../services/tempoClient';
-import { createJiraClient } from '../services/jiraClient';
+import { getSelectedProject, insertWorklogAudit } from '../db';
 import { calculateHours } from '../services/hourCalculator';
 import { distributeWorklogs } from '../services/worklogDistributor';
-import type { RequestHandler } from 'express';
+import { tryCatch, getTempoClient, getJiraClient } from './helpers';
+import { snapToHalf, SECONDS_PER_HOUR } from '../lib/math';
 
 const router = Router();
 
-function tryCatch(fn: (req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1]) => Promise<void>): RequestHandler {
-  return (req, res, next) => {
-    fn(req, res).catch(next);
-  };
-}
-
-function getTempoClient() {
-  const tempoTokenEnc = getSetting('tempo_token');
-  if (!tempoTokenEnc) return null;
-  return createTempoClient(decrypt(tempoTokenEnc));
-}
-
-function getJiraClient() {
-  const jiraUrlEnc = getSetting('jira_url');
-  const jiraEmailEnc = getSetting('jira_email');
-  const jiraTokenEnc = getSetting('jira_token');
-  if (!jiraUrlEnc || !jiraEmailEnc || !jiraTokenEnc) return null;
-  return createJiraClient(decrypt(jiraUrlEnc), decrypt(jiraEmailEnc), decrypt(jiraTokenEnc));
-}
-
-function snapToHalf(value: number): number {
-  return Math.round(value / 0.5) * 0.5;
-}
-
-// POST /calculate
-const RoleSchema = z.object({
-  roleId: z.union([z.string(), z.number()]),
+// Shared base for role fields common to both /calculate and /distribute
+const RoleBase = z.object({
+  roleId: z.number().int(),
   roleName: z.string(),
   billingRate: z.number().min(0),
+});
+
+// POST /calculate
+const CalculateRoleSchema = RoleBase.extend({
   memberCount: z.number().int().min(0),
 });
 
 const CalculateBody = z.object({
   targetRevenue: z.number(),
   currentRevenue: z.number(),
-  roles: z.array(RoleSchema),
+  roles: z.array(CalculateRoleSchema),
   from: z.string().optional(),
   to: z.string().optional(),
 });
@@ -62,7 +40,7 @@ router.post(
 
     const result = calculateHours(parsed.data);
     res.json({
-      breakdown: result.roles.map(r => ({ ...r, roleId: Number(r.roleId) })),
+      breakdown: result.roles,
       totalDeltaRevenue: result.totalDeltaRevenue,
       achievedRevenue: result.achievedRevenue,
     });
@@ -78,10 +56,8 @@ const IssueConfigSchema = z.object({
   complexity: z.number().min(1).max(10),
 });
 
-const RoleConfigSchema = z.object({
+const RoleConfigSchema = RoleBase.extend({
   roleId: z.number(),
-  roleName: z.string(),
-  billingRate: z.number(),
   accountIds: z.array(z.string()),
 });
 
@@ -149,7 +125,7 @@ router.post(
         })),
       });
       effectiveBreakdown = result.roles.map(r => ({
-        roleId: Number(r.roleId),
+        roleId: r.roleId,
         hoursPerMember: r.hoursPerMember,
         totalHours: r.totalHours,
       }));
@@ -197,7 +173,7 @@ router.post(
           });
           effectiveBreakdown = effectiveBreakdown.map(h => {
             if (cappedRoleIds.has(h.roleId)) return h;
-            const extraRole = extra.roles.find(r => Number(r.roleId) === h.roleId);
+            const extraRole = extra.roles.find(r => r.roleId === h.roleId);
             if (!extraRole || extraRole.totalHours === 0) return h;
             const memberCount = roleConfigs.find(r => r.roleId === h.roleId)?.accountIds.length || 1;
             const newTotal = h.totalHours + extraRole.totalHours;
@@ -238,10 +214,10 @@ router.post(
       }
     }
 
-    // Fetch existing worklogs for the period, scoped to the distributed issues only.
-    // Using projectId here is wrong — project.project_id is a Tempo financial UUID, not a
-    // numeric Jira project ID, so Tempo ignores it and returns ALL worklogs for all users,
-    // filling the capacity map with unrelated project work.
+    // Fetch existing worklogs for the period, then filter to assigned issues only.
+    // We scope client-side rather than via Tempo's projectId filter because
+    // project.project_id is a Tempo financial UUID (not a numeric Jira project ID),
+    // which Tempo ignores for worklog queries.
     let existingWorklogs: Awaited<ReturnType<typeof tempoClient.getWorklogs>> = [];
     try {
       const assignedIssueIds = new Set(issueConfigs.map(ic => Number(ic.issueId)));
@@ -249,8 +225,9 @@ router.post(
       existingWorklogs = allWorklogs.filter(
         wl => wl.issue?.id != null && assignedIssueIds.has(wl.issue.id)
       );
-    } catch {
+    } catch (err) {
       // Fall back to empty — distributor will assume full daily capacity
+      console.warn('Failed to fetch existing worklogs for capacity map, assuming full capacity:', err);
     }
 
     const { schedule: rawSchedule } = distributeWorklogs({ assignments, from, to, existingWorklogs, seed });
@@ -297,7 +274,7 @@ router.post(
     }
 
     const { accountId, issueId, startDate, hours } = parsed.data;
-    const timeSpentSeconds = Math.round(hours * 3600);
+    const timeSpentSeconds = Math.round(hours * SECONDS_PER_HOUR);
 
     try {
       const wl = await tempoClient.createWorklog({
@@ -314,10 +291,6 @@ router.post(
 
     } catch (tempoErr: unknown) {
       const isForbidden = axios.isAxiosError(tempoErr) && tempoErr.response?.status === 403;
-
-      if (isForbidden) {
-        console.warn(`[Tempo 403] accountId=${accountId} issueId=${issueId}`, JSON.stringify(axios.isAxiosError(tempoErr) ? tempoErr.response?.data : null));
-      }
 
       if (!isForbidden) {
         const errorMessage = tempoErr instanceof Error ? tempoErr.message : String(tempoErr);
@@ -346,77 +319,5 @@ router.post(
   })
 );
 
-// POST /submit (bulk — kept for backward compatibility)
-const SubmitEntrySchema = z.object({
-  accountId: z.string().min(1),
-  issueId: z.union([z.string(), z.number()]),
-  date: z.string().min(1),
-  hours: z.number().min(0),
-});
-
-const SubmitBody = z.object({
-  schedule: z.array(SubmitEntrySchema),
-});
-
-router.post(
-  '/submit',
-  tryCatch(async (req, res) => {
-    const parsed = SubmitBody.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Invalid body', details: parsed.error.flatten() });
-      return;
-    }
-
-    const tempoClient = getTempoClient();
-    if (!tempoClient) {
-      res.status(401).json({ error: 'Tempo credentials not configured' });
-      return;
-    }
-
-    const results = [];
-
-    for (const entry of parsed.data.schedule) {
-      try {
-        const timeSpentSeconds = Math.round(entry.hours * 3600);
-        const wl = await tempoClient.createWorklog({
-          issueId: entry.issueId,
-          authorAccountId: entry.accountId,
-          startDate: entry.date,
-          startTime: '09:00:00',
-          timeSpentSeconds,
-          billableSeconds: timeSpentSeconds,
-        });
-
-        insertWorklogAudit({
-          tempo_worklog_id: wl.tempoWorklogId,
-          account_id: entry.accountId,
-          issue_id: String(entry.issueId),
-          start_date: entry.date,
-          hours: entry.hours,
-          operation: 'create',
-          status: 'success',
-        });
-
-        results.push({ ...entry, success: true, tempoWorklogId: wl.tempoWorklogId });
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-
-        insertWorklogAudit({
-          account_id: entry.accountId,
-          issue_id: String(entry.issueId),
-          start_date: entry.date,
-          hours: entry.hours,
-          operation: 'create',
-          status: 'error',
-          error_message: errorMessage,
-        });
-
-        results.push({ ...entry, success: false, error: errorMessage });
-      }
-    }
-
-    res.json({ results });
-  })
-);
 
 export default router;

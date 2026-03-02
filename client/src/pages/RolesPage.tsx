@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { useRoles, useCreateRole, useSaveRoleDescriptions } from '@/hooks/useTeam';
 import { useToast } from '@/components/ui/use-toast';
@@ -124,8 +125,8 @@ export function RolesPage() {
                   <span className="text-xs text-muted-foreground">ID {role.id}</span>
                 </div>
                 <div className="relative">
-                  <textarea
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 resize-none"
+                  <Textarea
+                    className="resize-none"
                     rows={2}
                     maxLength={300}
                     placeholder="Describe what this role does on a typical project…"

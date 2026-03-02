@@ -1,13 +1,16 @@
 import { eachDayOfInterval, parseISO, getDay, format } from 'date-fns';
 import type { TempoWorklog, CreateWorklogBody } from '../types/tempo';
+import { snapToHalf, SECONDS_PER_HOUR } from '../lib/math';
+const UINT32 = 2 ** 32; // divisor to normalize Mulberry32 output to [0, 1)
+const DAILY_CAPACITY_HOURS = 8;
 
-export interface Assignment {
+interface Assignment {
   accountId: string;
   issueId: string | number;
   totalHours: number;
 }
 
-export interface DistributorInput {
+interface DistributorInput {
   assignments: Assignment[];
   from: string;
   to: string;
@@ -15,7 +18,7 @@ export interface DistributorInput {
   seed?: number;
 }
 
-export interface ScheduleEntry {
+interface ScheduleEntry {
   accountId: string;
   issueId: string | number;
   date: string;
@@ -23,7 +26,7 @@ export interface ScheduleEntry {
   overflow: boolean;
 }
 
-export interface DistributorOutput {
+interface DistributorOutput {
   schedule: ScheduleEntry[];
   worklogBodies: CreateWorklogBody[];
 }
@@ -36,7 +39,7 @@ function mulberry32(seed: number): () => number {
     let t = s;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    return ((t ^ (t >>> 14)) >>> 0) / UINT32;
   };
 }
 
@@ -47,10 +50,6 @@ function fisherYatesShuffle<T>(arr: T[], rand: () => number): T[] {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
-}
-
-function snapToHalf(value: number): number {
-  return Math.round(value / 0.5) * 0.5;
 }
 
 function getWeekKey(dateStr: string): string {
@@ -83,10 +82,10 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
   for (const wl of existingWorklogs) {
     const accountId = wl.author.accountId;
     const date = wl.startDate;
-    const hours = wl.timeSpentSeconds / 3600;
+    const hours = wl.timeSpentSeconds / SECONDS_PER_HOUR;
 
     if (!capacityMap[accountId]) capacityMap[accountId] = {};
-    capacityMap[accountId][date] = (capacityMap[accountId][date] ?? 8) - hours;
+    capacityMap[accountId][date] = (capacityMap[accountId][date] ?? DAILY_CAPACITY_HOURS) - hours;
     if (capacityMap[accountId][date] < 0) capacityMap[accountId][date] = 0;
   }
 
@@ -105,9 +104,9 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
     let remaining = totalHours;
 
     // Step 1: partition days by usable capacity
-    const goodDays = workingDays.filter((d) => (capacityMap[accountId][d] ?? 8) >= 1.0);
+    const goodDays = workingDays.filter((d) => (capacityMap[accountId][d] ?? DAILY_CAPACITY_HOURS) >= 1.0);
     const tinyDays = workingDays.filter((d) => {
-      const cap = capacityMap[accountId][d] ?? 8;
+      const cap = capacityMap[accountId][d] ?? DAILY_CAPACITY_HOURS;
       return cap > 0 && cap < 1.0;
     });
 
@@ -128,12 +127,12 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
         if (!weekMap.has(wk)) weekMap.set(wk, []);
         weekMap.get(wk)!.push(d);
       }
-      const goodWeeks = [...weekMap.keys()].sort();
+      const goodWeeks = [...weekMap.keys()].sort((a, b) => a.localeCompare(b));
 
       // Step 3: pick numTargetWeeks
       const goodCapByWeek: Record<string, number> = {};
       for (const wk of goodWeeks) {
-        goodCapByWeek[wk] = weekMap.get(wk)!.reduce((sum, d) => sum + (capacityMap[accountId][d] ?? 8), 0);
+        goodCapByWeek[wk] = weekMap.get(wk)!.reduce((sum, d) => sum + (capacityMap[accountId][d] ?? DAILY_CAPACITY_HOURS), 0);
       }
       const maxWeekCap = Math.max(...Object.values(goodCapByWeek));
       const minWeeks = Math.max(1, Math.ceil(totalHours / maxWeekCap));
@@ -147,14 +146,14 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
       // Step 4: collect pickedDays from chosen weeks
       const shuffledWeeks = fisherYatesShuffle(goodWeeks, rand);
       const pickedWeeks = new Set(shuffledWeeks.slice(0, numTargetWeeks));
-      const pickedDays = goodDays.filter((d) => pickedWeeks.has(getWeekKey(d))).sort();
+      const pickedDays = goodDays.filter((d) => pickedWeeks.has(getWeekKey(d))).sort((a, b) => a.localeCompare(b));
 
       // Step 5: distribute totalHours across pickedDays with 1h minimum
       for (let i = 0; i < pickedDays.length; i++) {
         if (remaining <= 0) break;
 
         const date = pickedDays[i];
-        const currentCap = capacityMap[accountId][date] ?? 8;
+        const currentCap = capacityMap[accountId][date] ?? DAILY_CAPACITY_HOURS;
         if (currentCap <= 0) continue;
 
         let toLog: number;
@@ -182,7 +181,7 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
         for (const date of shuffledExtra) {
           if (remaining <= 0) break;
 
-          const currentCap = capacityMap[accountId][date] ?? 8;
+          const currentCap = capacityMap[accountId][date] ?? DAILY_CAPACITY_HOURS;
           if (currentCap <= 0) continue;
 
           const toLog = snapToHalf(Math.min(currentCap, remaining));
@@ -202,7 +201,7 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
       for (const date of shuffledTiny) {
         if (remaining <= 0) break;
 
-        const currentCap = capacityMap[accountId][date] ?? 8;
+        const currentCap = capacityMap[accountId][date] ?? DAILY_CAPACITY_HOURS;
         if (currentCap <= 0) continue;
 
         const toLog = snapToHalf(Math.min(currentCap, remaining));
@@ -218,7 +217,7 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
     // Step 8: overflow if still remaining
     if (remaining > 0) {
       const shuffledAll = fisherYatesShuffle(workingDays, rand);
-      const overflowDays = shuffledAll.filter((d) => (capacityMap[accountId][d] ?? 8) >= 0);
+      const overflowDays = shuffledAll.filter((d) => (capacityMap[accountId][d] ?? DAILY_CAPACITY_HOURS) > 0);
       const targetDay = overflowDays[0] ?? workingDays[0];
 
       if (targetDay) {
@@ -233,8 +232,8 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
     authorAccountId: entry.accountId,
     startDate: entry.date,
     startTime: '09:00:00',
-    timeSpentSeconds: Math.round(entry.hours * 3600),
-    billableSeconds: Math.round(entry.hours * 3600),
+    timeSpentSeconds: Math.round(entry.hours * SECONDS_PER_HOUR),
+    billableSeconds: Math.round(entry.hours * SECONDS_PER_HOUR),
   }));
 
   return { schedule, worklogBodies };
