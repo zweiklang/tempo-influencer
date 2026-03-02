@@ -26,9 +26,13 @@ vi.mock('../../services/geminiClient', () => ({
   getAvailableModels: vi.fn(),
 }));
 
-vi.mock('../helpers', () => ({
-  tryCatch: (fn: Parameters<typeof express.Router>[0]) => fn,
-}));
+vi.mock('../helpers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../helpers')>();
+  return {
+    ...actual,
+    tryCatch: (fn: Parameters<typeof express.Router>[0]) => fn,
+  };
+});
 
 import { getSetting, getSelectedProject, setSetting, setSelectedProject } from '../../db';
 import { createTempoClient } from '../../services/tempoClient';
@@ -89,7 +93,7 @@ describe('PUT /credentials', () => {
   });
 
   it('returns 400 when Jira connection fails', async () => {
-    mockCreateJiraClient.mockReturnValue({ validateConnection: vi.fn().mockResolvedValue(false) } as unknown as ReturnType<typeof createJiraClient>);
+    mockCreateJiraClient.mockReturnValue({ testConnection: vi.fn().mockRejectedValue(new Error('connection failed')) } as unknown as ReturnType<typeof createJiraClient>);
     const res = await request(makeApp()).put('/credentials').send({
       jiraUrl: 'https://test.atlassian.net',
       jiraEmail: 'user@test.com',
@@ -101,7 +105,7 @@ describe('PUT /credentials', () => {
   });
 
   it('saves credentials when both connections succeed', async () => {
-    mockCreateJiraClient.mockReturnValue({ validateConnection: vi.fn().mockResolvedValue(true) } as unknown as ReturnType<typeof createJiraClient>);
+    mockCreateJiraClient.mockReturnValue({ testConnection: vi.fn().mockResolvedValue({ accountId: 'user1', displayName: 'User One' }) } as unknown as ReturnType<typeof createJiraClient>);
     mockCreateTempoClient.mockReturnValue({ getTeams: vi.fn().mockResolvedValue([]) } as unknown as ReturnType<typeof createTempoClient>);
     const res = await request(makeApp()).put('/credentials').send({
       jiraUrl: 'https://test.atlassian.net',

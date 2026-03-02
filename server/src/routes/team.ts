@@ -1,32 +1,9 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { getSetting, getSelectedProject, upsertTeamMemberCache, getAllBillingRateOverrides, setBillingRateOverride, getRoleDescription, setRoleDescriptions } from '../db';
-import { decrypt } from '../services/crypto';
-import { createTempoClient } from '../services/tempoClient';
-import { createJiraClient } from '../services/jiraClient';
-import type { RequestHandler } from 'express';
+import { getSelectedProject, upsertTeamMemberCache, getAllBillingRateOverrides, setBillingRateOverride, getRoleDescription, setRoleDescriptions } from '../db';
+import { tryCatch, getTempoClient, getJiraClient } from './helpers';
 
 const router = Router();
-
-function tryCatch(fn: (req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1]) => Promise<void>): RequestHandler {
-  return (req, res, next) => {
-    fn(req, res).catch(next);
-  };
-}
-
-function getTempoClient() {
-  const tempoTokenEnc = getSetting('tempo_token');
-  if (!tempoTokenEnc) return null;
-  return createTempoClient(decrypt(tempoTokenEnc));
-}
-
-function getJiraClient() {
-  const jiraUrlEnc = getSetting('jira_url');
-  const jiraEmailEnc = getSetting('jira_email');
-  const jiraTokenEnc = getSetting('jira_token');
-  if (!jiraUrlEnc || !jiraEmailEnc || !jiraTokenEnc) return null;
-  return createJiraClient(decrypt(jiraUrlEnc), decrypt(jiraEmailEnc), decrypt(jiraTokenEnc));
-}
 
 // GET /teams
 router.get(
@@ -65,8 +42,8 @@ router.get(
         const accountIds = rawMembers.map((m) => m.member.accountId);
         const jiraUsers = await jiraClient.getUsersByAccountIds(accountIds);
         jiraUsers.forEach((u) => displayNameMap.set(u.accountId, u.displayName));
-      } catch {
-        // Fall back to accountId as display name
+      } catch (err) {
+        console.warn('Failed to fetch Jira display names for team members, falling back to accountId:', err);
       }
     }
 

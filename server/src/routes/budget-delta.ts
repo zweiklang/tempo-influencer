@@ -226,7 +226,10 @@ router.post(
         wl => wl.issue?.id != null && assignedIssueIds.has(wl.issue.id)
       );
     } catch (err) {
-      // Fall back to empty — distributor will assume full daily capacity
+      // Intentional degradation: if worklog fetch fails the distributor still produces a valid schedule,
+      // just with over-estimated daily capacity. This is preferable to a hard 500 since the user
+      // can review and adjust the schedule before submitting. Distinct from distribute errors below,
+      // which would produce no schedule at all and must propagate as 500.
       console.warn('Failed to fetch existing worklogs for capacity map, assuming full capacity:', err);
     }
 

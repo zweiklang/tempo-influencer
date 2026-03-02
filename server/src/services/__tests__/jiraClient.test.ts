@@ -41,20 +41,6 @@ describe('createJiraClient', () => {
     });
   });
 
-  describe('validateConnection', () => {
-    it('returns true on successful request', async () => {
-      const get = vi.fn().mockResolvedValue({ data: { accountId: 'abc', displayName: 'Test User' } });
-      const { client } = makeClient(get);
-      expect(await client.validateConnection()).toBe(true);
-    });
-
-    it('returns false when request throws', async () => {
-      const get = vi.fn().mockRejectedValue(new Error('Unauthorized'));
-      const { client } = makeClient(get);
-      expect(await client.validateConnection()).toBe(false);
-    });
-  });
-
   describe('testConnection', () => {
     it('returns accountId and displayName from /myself', async () => {
       const get = vi.fn().mockResolvedValue({ data: { accountId: 'acc-1', displayName: 'Alice' } });

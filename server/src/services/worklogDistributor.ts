@@ -138,10 +138,9 @@ export function distributeWorklogs(input: DistributorInput): DistributorOutput {
       const minWeeks = Math.max(1, Math.ceil(totalHours / maxWeekCap));
       const maxWeeks = Math.min(goodWeeks.length, 3);
       const t = rand() * rand(); // quadratic bias → fewer weeks
-      const numTargetWeeks = Math.max(
-        minWeeks,
-        Math.min(Math.max(minWeeks, maxWeeks), Math.round(minWeeks + t * (Math.max(minWeeks, maxWeeks) - minWeeks)))
-      );
+      const weekRange = maxWeeks - minWeeks;
+      // Clamp result to [minWeeks, maxWeeks]
+      const numTargetWeeks = Math.min(maxWeeks, Math.max(minWeeks, Math.round(minWeeks + t * weekRange)));
 
       // Step 4: collect pickedDays from chosen weeks
       const shuffledWeeks = fisherYatesShuffle(goodWeeks, rand);

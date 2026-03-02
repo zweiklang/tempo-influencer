@@ -1,10 +1,8 @@
 import { Router } from 'express';
-import { getSetting, getSelectedProject, getTeamMemberCache } from '../db';
-import { decrypt } from '../services/crypto';
-import { createTempoClient } from '../services/tempoClient';
-import { createJiraClient } from '../services/jiraClient';
+import { getSelectedProject, getTeamMemberCache } from '../db';
 import { resolveRatesForMembers } from '../services/billingRates';
-import type { RequestHandler } from 'express';
+import { tryCatch, getTempoClient, getJiraClient } from './helpers';
+import { SECONDS_PER_HOUR } from '../lib/math';
 import type { TempoWorklog } from '../types/tempo';
 import type { TempoClient } from '../services/tempoClient';
 import type { JiraClient } from '../services/jiraClient';
@@ -12,24 +10,103 @@ import type { SelectedProject } from '../types/db';
 
 const router = Router();
 
-function tryCatch(fn: (req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1]) => Promise<void>): RequestHandler {
-  return (req, res, next) => {
-    fn(req, res).catch(next);
-  };
+type RatesMap = Map<string, { rate: number; source: string }>;
+
+interface EnrichedPipelineResult {
+  worklogs: TempoWorklog[];
+  ratesMap: RatesMap;
+  jiraUserMap: Map<string, string>;
+  issueMap: Map<number, { key: string; summary: string }>;
+  jiraClient: JiraClient | null;
 }
 
-function getTempoClient() {
-  const tempoTokenEnc = getSetting('tempo_token');
-  if (!tempoTokenEnc) return null;
-  return createTempoClient(decrypt(tempoTokenEnc));
+async function runEnrichedPipeline(
+  project: SelectedProject,
+  tempoClient: TempoClient,
+  from: string,
+  to: string,
+  { onProgress }: { onProgress?: (stage: string, message: string, progress: number) => void } = {},
+): Promise<EnrichedPipelineResult> {
+  let projectDefaultRate: number | null = null;
+  if (project.tempo_id) {
+    try {
+      const detail = await tempoClient.getProject(project.tempo_id);
+      projectDefaultRate = detail.defaultBillingRate?.value || null;
+    } catch (err) {
+      console.warn('Failed to fetch project default billing rate:', err);
+    }
+  }
+
+  const jiraClient = getJiraClient();
+
+  onProgress?.('worklogs', 'Fetching worklogs from Tempo...', 45);
+  const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
+
+  onProgress?.('members', 'Resolving team members...', 60);
+  const jiraUserMap = await buildJiraUserMap(worklogs, jiraClient);
+
+  onProgress?.('rates', 'Resolving billing rates...', 75);
+  const uniqueMembers = Array.from(
+    new Map(worklogs.map((wl) => [wl.author.accountId, wl.author.accountId])).values()
+  ).map((accountId) => {
+    const cached = getTeamMemberCache(accountId);
+    return { accountId, roleId: cached?.role_id ?? null };
+  });
+  const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
+
+  onProgress?.('issues', 'Fetching issue details from Jira...', 90);
+  const uniqueIssueIds = [...new Set(worklogs.map((wl) => wl.issue?.id).filter((id): id is number => id != null))];
+  const issueMap = jiraClient
+    ? await jiraClient.getIssuesByIds(uniqueIssueIds)
+    : new Map<number, { key: string; summary: string }>();
+
+  return { worklogs, ratesMap, jiraUserMap, issueMap, jiraClient };
 }
 
-function getJiraClient() {
-  const urlEnc = getSetting('jira_url');
-  const emailEnc = getSetting('jira_email');
-  const tokenEnc = getSetting('jira_token');
-  if (!urlEnc || !emailEnc || !tokenEnc) return null;
-  return createJiraClient(decrypt(urlEnc), decrypt(emailEnc), decrypt(tokenEnc));
+function enrichWorklogs(
+  worklogs: TempoWorklog[],
+  ratesMap: RatesMap,
+  jiraUserMap: Map<string, string>,
+  issueMap: Map<number, { key: string; summary: string }>
+) {
+  return worklogs.map((wl) => {
+    const resolved = ratesMap.get(wl.author.accountId) ?? { rate: 0, source: 'none' as const };
+    const cached = getTeamMemberCache(wl.author.accountId);
+    const issueInfo = wl.issue?.id != null ? issueMap.get(wl.issue.id) : undefined;
+    const hours = wl.timeSpentSeconds / SECONDS_PER_HOUR;
+    return {
+      accountId: wl.author.accountId,
+      displayName: cached?.display_name ?? jiraUserMap.get(wl.author.accountId) ?? wl.author.accountId,
+      role: cached?.role_name ?? undefined,
+      issueKey: issueInfo?.key,
+      issueSummary: issueInfo?.summary,
+      startDate: wl.startDate,
+      hours,
+      billingRate: resolved.rate,
+      rateSource: resolved.source,
+      revenue: hours * resolved.rate,
+    };
+  });
+}
+
+async function buildJiraUserMap(
+  worklogs: TempoWorklog[],
+  jiraClient: JiraClient | null
+): Promise<Map<string, string>> {
+  const jiraUserMap = new Map<string, string>();
+  if (!jiraClient) return jiraUserMap;
+  const uncachedIds = [...new Set(worklogs.map((wl) => wl.author.accountId))]
+    .filter((id) => !getTeamMemberCache(id));
+  for (let i = 0; i < uncachedIds.length; i += 50) {
+    const chunk = uncachedIds.slice(i, i + 50);
+    try {
+      const users = await jiraClient.getUsersByAccountIds(chunk);
+      for (const u of users) jiraUserMap.set(u.accountId, u.displayName);
+    } catch (err) {
+      console.warn('Failed to fetch Jira users for chunk, falling back to accountId:', err);
+    }
+  }
+  return jiraUserMap;
 }
 
 
@@ -48,15 +125,15 @@ async function fetchScopedWorklogs(
       if (scope?.type && scope?.reference) {
         scopeIssueIds = await jiraClient.getIssueIdsByScope(scope.type, scope.reference);
       }
-    } catch {
-      // fall through — no scope filtering if API fails
+    } catch (err) {
+      console.warn('Failed to fetch project scope, skipping scope filter:', err);
     }
   }
 
   const allWorklogs = await tempoClient.getWorklogs({ from, to });
 
   if (scopeIssueIds && scopeIssueIds.size > 0) {
-    return allWorklogs.filter((wl) => wl.issue?.id != null && scopeIssueIds!.has(wl.issue.id));
+    return allWorklogs.filter((wl) => wl.issue?.id != null && scopeIssueIds.has(wl.issue.id));
   }
   return allWorklogs;
 }
@@ -83,6 +160,9 @@ router.get(
 );
 
 // GET /worklogs/stream?from=&to=  (SSE)
+// Cannot use tryCatch helper: SSE requires headers to be flushed before async work begins,
+// after which any error must be surfaced as an SSE event rather than an HTTP status change.
+// Errors after flushHeaders are handled inside run() via emit({ stage: 'error', ... }).
 router.get('/worklogs/stream', (req, res) => {
   const from = String(req.query.from ?? '');
   const to = String(req.query.to ?? '');
@@ -121,74 +201,12 @@ router.get('/worklogs/stream', (req, res) => {
 
       emit({ stage: 'scope', message: 'Determining project scope...', progress: 25 });
 
-      let projectDefaultRate: number | null = null;
-      if (project.tempo_id) {
-        try {
-          const detail = await tempoClient.getProject(project.tempo_id);
-          projectDefaultRate = detail.defaultBillingRate?.value || null;
-        } catch {
-          // fall through
-        }
-      }
+      const { worklogs, ratesMap, jiraUserMap, issueMap } = await runEnrichedPipeline(
+        project, tempoClient, from, to,
+        { onProgress: (stage, message, progress) => emit({ stage, message, progress }) },
+      );
 
-      const jiraClient = getJiraClient();
-
-      emit({ stage: 'worklogs', message: 'Fetching worklogs from Tempo...', progress: 45 });
-      const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
-
-      emit({ stage: 'members', message: 'Resolving team members...', progress: 60 });
-
-      const jiraUserMap = new Map<string, string>();
-      if (jiraClient) {
-        const uncachedIds = [...new Set(worklogs.map((wl) => wl.author.accountId))]
-          .filter((id) => !getTeamMemberCache(id));
-        for (let i = 0; i < uncachedIds.length; i += 50) {
-          const chunk = uncachedIds.slice(i, i + 50);
-          try {
-            const users = await jiraClient.getUsersByAccountIds(chunk);
-            for (const u of users) jiraUserMap.set(u.accountId, u.displayName);
-          } catch {
-            // fall through
-          }
-        }
-      }
-
-      emit({ stage: 'rates', message: 'Resolving billing rates...', progress: 75 });
-
-      const uniqueMembers = Array.from(
-        new Map(worklogs.map((wl) => [wl.author.accountId, wl.author.accountId])).values()
-      ).map((accountId) => {
-        const cached = getTeamMemberCache(accountId);
-        return { accountId, roleId: cached?.role_id ?? null };
-      });
-
-      const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
-
-      emit({ stage: 'issues', message: 'Fetching issue details from Jira...', progress: 90 });
-
-      const uniqueIssueIds = [...new Set(worklogs.map((wl) => wl.issue?.id).filter((id): id is number => id != null))];
-      const issueMap = jiraClient
-        ? await jiraClient.getIssuesByIds(uniqueIssueIds)
-        : new Map<number, { key: string; summary: string }>();
-
-      const enriched = worklogs.map((wl) => {
-        const resolved = ratesMap.get(wl.author.accountId) ?? { rate: 0, source: 'none' as const };
-        const cached = getTeamMemberCache(wl.author.accountId);
-        const issueInfo = wl.issue?.id != null ? issueMap.get(wl.issue.id) : undefined;
-        const hours = wl.timeSpentSeconds / 3600;
-        return {
-          accountId: wl.author.accountId,
-          displayName: cached?.display_name ?? jiraUserMap.get(wl.author.accountId) ?? wl.author.accountId,
-          role: cached?.role_name ?? undefined,
-          issueKey: issueInfo?.key,
-          issueSummary: issueInfo?.summary,
-          startDate: wl.startDate,
-          hours,
-          billingRate: resolved.rate,
-          rateSource: resolved.source,
-          revenue: hours * resolved.rate,
-        };
-      });
+      const enriched = enrichWorklogs(worklogs, ratesMap, jiraUserMap, issueMap);
 
       emit({ stage: 'complete', data: enriched, progress: 100 });
       res.end();
@@ -225,69 +243,8 @@ router.get(
       return;
     }
 
-    // Fetch project defaultBillingRate for rate cascade
-    let projectDefaultRate: number | null = null;
-    if (project.tempo_id) {
-      try {
-        const detail = await tempoClient.getProject(project.tempo_id);
-        projectDefaultRate = detail.defaultBillingRate?.value || null;
-      } catch {
-        // fall through
-      }
-    }
-
-    const jiraClient = getJiraClient();
-    const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
-
-    // Resolve display names for members not in team cache
-    const jiraUserMap = new Map<string, string>();
-    if (jiraClient) {
-      const uncachedIds = [...new Set(worklogs.map((wl) => wl.author.accountId))]
-        .filter((id) => !getTeamMemberCache(id));
-      for (let i = 0; i < uncachedIds.length; i += 50) {
-        const chunk = uncachedIds.slice(i, i + 50);
-        try {
-          const users = await jiraClient.getUsersByAccountIds(chunk);
-          for (const u of users) jiraUserMap.set(u.accountId, u.displayName);
-        } catch {
-          // fall through — accountId fallback still applies
-        }
-      }
-    }
-
-    // Resolve billing rates for all unique authors
-    const uniqueMembers = Array.from(
-      new Map(worklogs.map((wl) => [wl.author.accountId, wl.author.accountId])).values()
-    ).map((accountId) => {
-      const cached = getTeamMemberCache(accountId);
-      return { accountId, roleId: cached?.role_id ?? null };
-    });
-
-    const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
-
-    // Batch-fetch issue keys from Jira (Tempo only returns numeric issue IDs)
-    const uniqueIssueIds = [...new Set(worklogs.map((wl) => wl.issue?.id).filter((id): id is number => id != null))];
-    const issueMap = jiraClient ? await jiraClient.getIssuesByIds(uniqueIssueIds) : new Map<number, { key: string; summary: string }>();
-
-    const enriched = worklogs.map((wl) => {
-      const resolved = ratesMap.get(wl.author.accountId) ?? { rate: 0, source: 'none' as const };
-      const cached = getTeamMemberCache(wl.author.accountId);
-      const issueInfo = wl.issue?.id != null ? issueMap.get(wl.issue.id) : undefined;
-      const hours = wl.timeSpentSeconds / 3600;
-      return {
-        accountId: wl.author.accountId,
-        displayName: cached?.display_name ?? jiraUserMap.get(wl.author.accountId) ?? wl.author.accountId,
-        role: cached?.role_name ?? undefined,
-        issueKey: issueInfo?.key,
-        issueSummary: issueInfo?.summary,
-        startDate: wl.startDate,
-        hours,
-        billingRate: resolved.rate,
-        rateSource: resolved.source,
-        revenue: hours * resolved.rate,
-      };
-    });
-
+    const { worklogs, ratesMap, jiraUserMap, issueMap } = await runEnrichedPipeline(project, tempoClient, from, to);
+    const enriched = enrichWorklogs(worklogs, ratesMap, jiraUserMap, issueMap);
     res.json(enriched);
   })
 );
@@ -316,34 +273,13 @@ router.get(
       return;
     }
 
-    // Fetch project defaultBillingRate for rate cascade
-    let projectDefaultRate: number | null = null;
-    if (project.tempo_id) {
-      try {
-        const detail = await tempoClient.getProject(project.tempo_id);
-        projectDefaultRate = detail.defaultBillingRate?.value || null;
-      } catch {
-        // fall through
-      }
-    }
-
-    const jiraClient = getJiraClient();
-    const worklogs = await fetchScopedWorklogs(project, tempoClient, jiraClient, from, to);
-
-    const uniqueMembers = Array.from(
-      new Map(worklogs.map((wl) => [wl.author.accountId, wl.author.accountId])).values()
-    ).map((accountId) => {
-      const cached = getTeamMemberCache(accountId);
-      return { accountId, roleId: cached?.role_id ?? null };
-    });
-
-    const ratesMap = await resolveRatesForMembers(project.project_id, uniqueMembers, tempoClient, projectDefaultRate);
+    const { worklogs, ratesMap } = await runEnrichedPipeline(project, tempoClient, from, to);
 
     let totalHours = 0;
     let totalRevenue = 0;
 
     for (const wl of worklogs) {
-      const hours = wl.timeSpentSeconds / 3600;
+      const hours = wl.timeSpentSeconds / SECONDS_PER_HOUR;
       const resolved = ratesMap.get(wl.author.accountId) ?? { rate: 0, source: 'none' as const };
       totalHours += hours;
       totalRevenue += hours * resolved.rate;

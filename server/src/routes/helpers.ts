@@ -2,9 +2,9 @@ import { getSetting } from '../db';
 import { decrypt } from '../services/crypto';
 import { createTempoClient } from '../services/tempoClient';
 import { createJiraClient } from '../services/jiraClient';
-import type { RequestHandler } from 'express';
+import type { Request, Response, RequestHandler } from 'express';
 
-export function tryCatch(fn: (req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1]) => Promise<void>): RequestHandler {
+export function tryCatch(fn: (req: Request, res: Response) => Promise<void>): RequestHandler {
   return (req, res, next) => {
     fn(req, res).catch(next);
   };
@@ -22,4 +22,10 @@ export function getJiraClient() {
   const jiraTokenEnc = getSetting('jira_token');
   if (!jiraUrlEnc || !jiraEmailEnc || !jiraTokenEnc) return null;
   return createJiraClient(decrypt(jiraUrlEnc), decrypt(jiraEmailEnc), decrypt(jiraTokenEnc));
+}
+
+export function getGeminiApiKey(): string | null {
+  const enc = getSetting('gemini_token');
+  if (!enc) return null;
+  return decrypt(enc);
 }

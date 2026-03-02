@@ -1,3 +1,5 @@
+// Uses native fetch rather than axios: Gemini API keys are passed as query params,
+// not Bearer tokens, so axios provides no benefit over fetch here.
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
 export async function getAvailableModels(apiKey: string): Promise<{ id: string; displayName: string }[]> {
@@ -21,7 +23,7 @@ export async function getAvailableModels(apiKey: string): Promise<{ id: string; 
     }));
 }
 
-export interface GeminiIssue {
+interface GeminiIssue {
   id: number;
   key: string;
   summary: string;
@@ -29,13 +31,13 @@ export interface GeminiIssue {
   parentSummary?: string;
 }
 
-export interface GeminiRole {
+interface GeminiRole {
   id: number;
   name: string;
   description?: string;
 }
 
-export interface RoleSuggestion {
+interface RoleSuggestion {
   issueId: number;
   roleIds: number[];
 }
@@ -55,19 +57,16 @@ export async function suggestRoles(
   apiKey: string,
   model = 'gemini-2.0-flash'
 ): Promise<RoleSuggestion[]> {
-  const rolesText = roles
-    .map((r) => `{id: ${r.id}, name: "${r.name}"${r.description ? `, description: "${r.description}"` : ''}}`)
-    .join(', ');
-  const issuesText = issues
-    .map((i) => {
-      const parts = [`{id: ${i.id}, key: "${i.key}", summary: "${i.summary}"`];
-      if (i.labels && i.labels.length > 0) parts.push(`, labels: [${i.labels.map((l) => `"${l}"`).join(', ')}]`);
-      if (i.parentSummary) parts.push(`, parentSummary: "${i.parentSummary}"`);
-      return parts.join('') + '}';
-    })
-    .join(', ');
+  const rolesPayload = roles.map((r) => ({ id: r.id, name: r.name, ...(r.description ? { description: r.description } : {}) }));
+  const issuesPayload = issues.map((i) => ({
+    id: i.id,
+    key: i.key,
+    summary: i.summary,
+    ...(i.labels && i.labels.length > 0 ? { labels: i.labels } : {}),
+    ...(i.parentSummary ? { parentSummary: i.parentSummary } : {}),
+  }));
 
-  const userMessage = `Available roles:\n[${rolesText}]\n\nIssues to assign:\n[${issuesText}]`;
+  const userMessage = `Available roles:\n${JSON.stringify(rolesPayload, null, 2)}\n\nIssues to assign:\n${JSON.stringify(issuesPayload, null, 2)}`;
 
   const body = {
     systemInstruction: {

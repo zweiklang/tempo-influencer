@@ -5,7 +5,7 @@ import { encrypt, decrypt } from '../services/crypto';
 import { createTempoClient } from '../services/tempoClient';
 import { createJiraClient } from '../services/jiraClient';
 import { getAvailableModels } from '../services/geminiClient';
-import { tryCatch, getTempoClient } from './helpers';
+import { tryCatch, getTempoClient, getGeminiApiKey } from './helpers';
 
 const router = Router();
 
@@ -53,8 +53,9 @@ router.put(
 
     // Test Jira connection
     const jiraClient = createJiraClient(jiraUrl, jiraEmail, jiraToken);
-    const jiraOk = await jiraClient.validateConnection();
-    if (!jiraOk) {
+    try {
+      await jiraClient.testConnection();
+    } catch {
       res.status(400).json({ error: 'Jira connection failed. Check URL, email and token.' });
       return;
     }
@@ -184,12 +185,12 @@ router.put(
 router.get(
   '/gemini/models',
   tryCatch(async (_req, res) => {
-    const geminiTokenEnc = getSetting('gemini_token');
-    if (!geminiTokenEnc) {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
       res.status(401).json({ error: 'Gemini API key not configured' });
       return;
     }
-    const models = await getAvailableModels(decrypt(geminiTokenEnc));
+    const models = await getAvailableModels(apiKey);
     models.sort((a, b) => a.displayName.localeCompare(b.displayName));
     res.json(models);
   })

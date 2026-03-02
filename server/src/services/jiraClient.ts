@@ -1,6 +1,16 @@
 import axios, { AxiosInstance } from 'axios';
 import type { JiraProject, JiraIssue, JiraUser } from '../types/jira';
 
+/** Build a JQL expression from a Tempo scope type and reference value. */
+export function buildScopeJQL(scopeType: string, reference: string): string {
+  switch (scopeType) {
+    case 'filter':  return `filter = ${reference}`;
+    case 'project': return `project = "${reference}"`;
+    case 'epic':    return `parent = "${reference}" OR "Epic Link" = "${reference}"`;
+    default:        return reference; // 'jql' type: use reference directly
+  }
+}
+
 export function createJiraClient(baseUrl: string, email: string, token: string) {
   const credentials = Buffer.from(`${email}:${token}`).toString('base64');
 
@@ -30,15 +40,6 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
       return res.data.issues;
     },
 
-    async validateConnection(): Promise<boolean> {
-      try {
-        await client.get<JiraUser>('myself');
-        return true;
-      } catch {
-        return false;
-      }
-    },
-
     async testConnection(): Promise<{ accountId: string; displayName: string }> {
       const res = await client.get<JiraUser>('myself');
       return {
@@ -59,6 +60,7 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
       const result = new Map<number, { key: string; summary: string }>();
       // Jira search supports up to 200 results; chunk if needed
       const chunkSize = 200;
+      const errors: unknown[] = [];
       for (let i = 0; i < ids.length; i += chunkSize) {
         const chunk = ids.slice(i, i + chunkSize);
         const jql = `id in (${chunk.join(',')})`;
@@ -71,9 +73,12 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
           for (const issue of res.data.issues) {
             result.set(Number(issue.id), { key: issue.key, summary: issue.fields.summary });
           }
-        } catch {
-          // skip on error
+        } catch (err) {
+          errors.push(err);
         }
+      }
+      if (errors.length > 0 && result.size === 0) {
+        throw errors[0];
       }
       return result;
     },
@@ -108,13 +113,7 @@ export function createJiraClient(baseUrl: string, email: string, token: string) 
     },
 
     async getIssueIdsByScope(scopeType: string, reference: string): Promise<Set<number>> {
-      let jql: string;
-      switch (scopeType) {
-        case 'filter':  jql = `filter = ${reference}`; break;
-        case 'project': jql = `project = "${reference}"`; break;
-        case 'epic':    jql = `parent = "${reference}" OR "Epic Link" = "${reference}"`; break;
-        default:        jql = reference; // 'jql' type: use reference directly
-      }
+      const jql = buildScopeJQL(scopeType, reference);
       const ids = new Set<number>();
       let nextPageToken: string | undefined;
       while (true) {
