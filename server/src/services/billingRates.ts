@@ -1,51 +1,14 @@
 import { getBillingRateOverride } from '../db';
 import type { TempoClient } from './tempoClient';
 
-export type RateSource = 'override' | 'global' | 'project-default' | 'none';
+type RateSource = 'override' | 'global' | 'project-default' | 'none';
 
-export interface ResolvedRate {
+interface ResolvedRate {
   rate: number;
   source: RateSource;
 }
 
-export async function resolveRate(
-  projectId: string,
-  accountId: string,
-  roleId: number | null | undefined,
-  tempoClient: TempoClient,
-  projectDefaultRate?: number | null
-): Promise<ResolvedRate> {
-  // 1. Check billing_rate_overrides
-  const override = getBillingRateOverride(projectId, accountId);
-  if (override !== null) {
-    return { rate: override, source: 'override' };
-  }
-
-  // 2. Look up global rates by role
-  if (roleId != null) {
-    try {
-      const globalRates = await tempoClient.getGlobalRates();
-      const roleRate = globalRates.find(
-        (r) => r.account?.type === 'ROLE' && String(r.account.id) === String(roleId)
-      );
-      if (roleRate) {
-        return { rate: roleRate.rate, source: 'global' };
-      }
-    } catch {
-      // Fall through
-    }
-  }
-
-  // 3. Project default rate
-  if (projectDefaultRate != null) {
-    return { rate: projectDefaultRate, source: 'project-default' };
-  }
-
-  // 4. No rate found
-  return { rate: 0, source: 'none' };
-}
-
-export interface MemberInput {
+interface MemberInput {
   accountId: string;
   roleId?: number | null;
 }

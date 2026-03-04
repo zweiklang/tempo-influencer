@@ -12,24 +12,24 @@ export interface JiraProject {
   avatarUrls?: JiraAvatarUrls;
 }
 
-export interface JiraStatusCategory {
+interface JiraStatusCategory {
   id: number;
   key: string;
   name: string;
 }
 
-export interface JiraStatus {
+interface JiraStatus {
   statusCategory: JiraStatusCategory;
   name?: string;
 }
 
-export interface JiraAssignee {
+interface JiraAssignee {
   accountId: string;
   displayName: string;
   emailAddress?: string;
 }
 
-export interface JiraIssueType {
+interface JiraIssueType {
   name: string;
 }
 

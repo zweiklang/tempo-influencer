@@ -33,5 +33,3 @@ export interface WorklogAuditInsert {
   error_message?: string | null;
 }
 
-// Alias to match spec naming
-export type WorklogAuditEntry = WorklogAuditInsert;

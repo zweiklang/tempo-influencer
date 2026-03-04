@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { RateSourceBadge } from '@/components/RateSourceBadge';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
@@ -35,13 +36,6 @@ interface UserGroup {
 
 interface BudgetData {
   amount: { value: number; currencyCode: string };
-}
-
-function RateSourceBadge({ source }: { source?: string }) {
-  if (source === 'override') return <Badge className="ml-1 text-xs bg-blue-100 text-blue-800 border-0">override</Badge>;
-  if (source === 'global') return <Badge variant="secondary" className="ml-1 text-xs">global</Badge>;
-  if (source === 'project-default') return <Badge className="ml-1 text-xs bg-purple-100 text-purple-800 border-0">project default</Badge>;
-  return <Badge variant="destructive" className="ml-1 text-xs">none</Badge>;
 }
 
 export function WorklogsPage() {

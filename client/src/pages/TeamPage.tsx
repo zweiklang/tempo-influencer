@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { RateSourceBadge } from '@/components/RateSourceBadge';
 import {
   Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
 } from '@/components/ui/select';
@@ -19,6 +20,7 @@ import { useAppStore } from '@/store/appStore';
 import { useToast } from '@/components/ui/use-toast';
 import { formatCurrency } from '@/lib/utils';
 import { Loader2 } from 'lucide-react';
+import type { BillingRatesResponse } from '@/types/billingRates';
 
 interface TempoTeam {
   id: number;
@@ -38,11 +40,7 @@ interface Role {
   name: string;
 }
 
-interface BillingRatesData {
-  projectDefaultRate: number | null;
-  globalRates: Array<{ account?: { id: string; type: string }; rate: number }>;
-  overrides: Array<{ account_id: string; billing_rate: number }>;
-}
+type BillingRatesData = BillingRatesResponse;
 
 type ResolvedRate = { rate: number; source: 'override' | 'global' | 'project-default' | 'none' };
 
@@ -68,13 +66,6 @@ function resolveRateClient(
   }
 
   return { rate: 0, source: 'none' };
-}
-
-function RateSourceBadge({ source }: { source: string }) {
-  if (source === 'override') return <Badge className="text-xs bg-blue-100 text-blue-800 border-0">override</Badge>;
-  if (source === 'global') return <Badge variant="secondary" className="text-xs">global</Badge>;
-  if (source === 'project-default') return <Badge className="text-xs bg-purple-100 text-purple-800 border-0">project default</Badge>;
-  return <Badge variant="destructive" className="text-xs">none</Badge>;
 }
 
 function MemberRow({
@@ -123,7 +114,6 @@ function MemberRow({
     try {
       await saveOverride.mutateAsync({
         accountId: member.accountId,
-        projectId: projectId ?? '',
         rate,
       });
       toast({ title: 'Billing rate override saved' });
@@ -191,12 +181,12 @@ export function TeamPage() {
   const { data: teamsData, isLoading: teamsLoading } = useTeams();
   const { data: membersData, isLoading: membersLoading } = useTeamMembers(activeTeamId);
   const { data: rolesData } = useRoles();
-  const { data: billingRatesData } = useBillingRates(selectedProject?.projectId);
+  const { data: billingRatesData } = useBillingRates();
 
   const teams = (teamsData as TempoTeam[]) || [];
   const members = (membersData as TeamMember[]) || [];
   const roles = (rolesData as Role[]) || [];
-  const billingRates = billingRatesData as BillingRatesData | undefined;
+  const billingRates = billingRatesData;
 
   const filteredMembers = members.filter(
     (m) => !roleFilter || (m.roleName ?? '').toLowerCase().includes(roleFilter.toLowerCase())

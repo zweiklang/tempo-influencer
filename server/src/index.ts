@@ -6,7 +6,7 @@ import cors from 'cors';
 import * as path from 'path';
 import * as fs from 'fs';
 import { PORT, NODE_ENV } from './config';
-import { initDb } from './db';
+import './db'; // Initialize database (runs migrations on import)
 
 import settingsRouter from './routes/settings';
 import projectRouter from './routes/project';
@@ -14,23 +14,11 @@ import teamRouter from './routes/team';
 import issuesRouter from './routes/issues';
 import budgetDeltaRouter from './routes/budget-delta';
 
-// Initialize database (runs migrations)
-initDb();
-
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-// Helper HOF for async route error handling
-export function tryCatch(
-  fn: (req: Request, res: Response) => Promise<void>
-) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    fn(req, res).catch(next);
-  };
-}
 
 // API Routes
 app.use('/api/settings', settingsRouter);

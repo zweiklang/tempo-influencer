@@ -42,7 +42,14 @@ export function useWorklogsStream(): StreamState {
     );
 
     es.onmessage = (event) => {
-      const payload = JSON.parse(event.data as string);
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(event.data as string);
+      } catch {
+        setState((prev) => ({ ...prev, isLoading: false, error: 'Invalid server response' }));
+        es.close();
+        return;
+      }
       if (payload.stage === 'complete') {
         setState({ isLoading: false, progress: 100, message: '', data: payload.data, error: null });
         es.close();

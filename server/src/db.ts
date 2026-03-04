@@ -8,12 +8,6 @@ import type {
   WorklogAuditInsert,
 } from './types/db';
 
-// initDb is called from index.ts; actual initialization happens at module load time
-export function initDb(): void {
-  // No-op: SQLite DB is initialized when this module is first imported.
-  // This function exists for explicit call-site documentation in index.ts.
-}
-
 // Ensure data directory exists
 const dataDir = path.resolve(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -21,7 +15,7 @@ if (!fs.existsSync(dataDir)) {
 }
 
 const dbPath = path.join(dataDir, 'tempo-influencer.db');
-export const db = new Database(dbPath);
+const db = new Database(dbPath);
 
 // Enable WAL mode for better concurrency
 db.pragma('journal_mode = WAL');
@@ -32,7 +26,7 @@ const migrationsDir = path.resolve(__dirname, 'migrations');
 const migrationFiles = fs
   .readdirSync(migrationsDir)
   .filter((f) => f.endsWith('.sql'))
-  .sort();
+  .sort((a, b) => a.localeCompare(b));
 
 for (const file of migrationFiles) {
   const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
@@ -103,9 +97,6 @@ export function getAllBillingRateOverrides(projectId: string): BillingRateOverri
     .all(projectId) as BillingRateOverride[];
 }
 
-// Alias to match spec naming convention
-export const upsertBillingRateOverride = setBillingRateOverride;
-
 // ---- Team Member Cache ----
 
 export function upsertTeamMemberCache(member: TeamMemberCache): void {
@@ -135,22 +126,6 @@ export function getTeamMemberCache(accountId: string): TeamMemberCache | null {
     .prepare('SELECT * FROM team_member_cache WHERE account_id = ?')
     .get(accountId) as TeamMemberCache | undefined;
   return row ?? null;
-}
-
-// Returns all cached team member account IDs (used to filter worklogs to project team)
-export function getCachedTeamMemberIds(): Set<string> {
-  const rows = db
-    .prepare('SELECT account_id FROM team_member_cache')
-    .all() as { account_id: string }[];
-  return new Set(rows.map((r) => r.account_id));
-}
-
-// Returns the team_id from the first cached team member (used as worklog filter)
-export function getCachedTeamId(): number | null {
-  const row = db
-    .prepare('SELECT team_id FROM team_member_cache WHERE team_id IS NOT NULL LIMIT 1')
-    .get() as { team_id: string } | undefined;
-  return row?.team_id ? Number(row.team_id) : null;
 }
 
 // ---- Role Descriptions ----

@@ -3,13 +3,11 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 
-// Exported path constants
-export const DATA_DIR = path.resolve(__dirname, '..', 'data');
-export const DB_PATH = path.join(DATA_DIR, 'tempo-influencer.db');
+const dataDir = path.resolve(__dirname, '..', 'data');
 
 // Ensure DATA_DIR exists
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
 }
 
 // Load .env from server directory
@@ -56,6 +54,3 @@ const _encryptionSalt = ensureEncryptionSalt();
 export function getEncryptionSalt(): string {
   return _encryptionSalt;
 }
-
-// Also export as a named constant for convenience
-export const ENCRYPTION_SALT = _encryptionSalt;

@@ -1,6 +1,6 @@
 export interface TempoWorklogAuthor {
   accountId: string;
-  displayName: string;
+  displayName?: string;
 }
 
 export interface TempoWorklogIssue {
@@ -80,13 +80,13 @@ export interface TempoGlobalRate {
   endDate?: string;
 }
 
-export interface TempoBillingRate {
+interface TempoBillingRate {
   id: number;
   rate: number;
   currency?: string;
 }
 
-export interface TempoProject {
+interface TempoProject {
   id: string;
   name: string;
   key: string;

@@ -19,7 +19,6 @@ async function paginate<T>(
 ): Promise<T[]> {
   const allResults: T[] = [];
   let offset = 0;
-  const limit = 5000;
 
   while (true) {
     const page = await fetcher(offset);
@@ -83,10 +82,12 @@ export function createTempoClient(token: string) {
     },
 
     async getTeams(): Promise<TempoTeam[]> {
-      const res = await client.get<{ results: TempoTeam[]; metadata: { count: number; limit: number; next?: string } }>('teams', {
-        params: { limit: 5000 },
+      return paginate<TempoTeam>(async (offset) => {
+        const res = await client.get<{ results: TempoTeam[]; metadata: { count: number; limit: number; next?: string } }>('teams', {
+          params: { limit: 5000, offset },
+        });
+        return res.data;
       });
-      return res.data.results;
     },
 
     async getTeamMembers(teamId: string): Promise<TempoTeamMember[]> {

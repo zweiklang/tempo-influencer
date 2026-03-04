@@ -22,3 +22,8 @@ tempo-api-research.md
 # Build artifacts
 client/dist/
 server/dist/
+
+# Tool state
+.claude/
+.desloppify/
+server/.desloppify/
